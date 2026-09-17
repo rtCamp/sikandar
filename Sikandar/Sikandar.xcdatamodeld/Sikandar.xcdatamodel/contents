@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="1" systemVersion="11A491" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithCloudKit="false" userDefinedModelVersionIdentifier="">
+    <entity name="Player" representedClassName="Player" syncable="YES" codeGenerationType="none">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String" defaultValueString=""/>
+        <attribute name="colorIndex" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <relationship name="games" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="Game" inverseName="players" inverseEntity="Game"/>
+        <relationship name="wonRounds" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="GameRound" inverseName="winner" inverseEntity="GameRound"/>
+    </entity>
+    <entity name="Game" representedClassName="Game" syncable="YES" codeGenerationType="none">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="startedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="endedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="betAmount" attributeType="Double" defaultValueString="100" usesScalarValueType="YES"/>
+        <relationship name="players" toMany="YES" deletionRule="Nullify" destinationEntity="Player" inverseName="games" inverseEntity="Player"/>
+        <relationship name="rounds" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="GameRound" inverseName="game" inverseEntity="GameRound"/>
+    </entity>
+    <entity name="GameRound" representedClassName="GameRound" syncable="YES" codeGenerationType="none">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="index" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="date" attributeType="Date" usesScalarValueType="NO"/>
+        <relationship name="winner" maxCount="1" deletionRule="Nullify" destinationEntity="Player" inverseName="wonRounds" inverseEntity="Player"/>
+        <relationship name="game" maxCount="1" deletionRule="Nullify" destinationEntity="Game" inverseName="rounds" inverseEntity="Game"/>
+    </entity>
+    <elements>
+        <element name="Player" positionX="-63" positionY="-18" width="128" height="119"/>
+        <element name="Game" positionX="120" positionY="-18" width="128" height="119"/>
+        <element name="GameRound" positionX="300" positionY="-18" width="128" height="104"/>
+    </elements>
+</model>
