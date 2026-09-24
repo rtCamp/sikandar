@@ -325,9 +325,12 @@ final class PersistenceController: ObservableObject {
     /// defaults); a backup is taken first when one is needed. Failures are
     /// published, never "fixed" — the file on disk is left exactly as it was.
     func load() {
+        // A store that's already attached means an earlier call succeeded; re-adding it would fail.
+        guard container.persistentStoreCoordinator.persistentStores.isEmpty else { return }
         loadFailure = nil
         backUpStoreIfMigrationNeeded()
-        // ASSUMED: completion runs synchronously for the local SQLite store (docs/ASSUMPTIONS.md).
+        // ASSUMED: completion runs synchronously (shouldAddStoreAsynchronously defaults to false),
+        // so loadFailure is set before the first frame and Retry can't overlap a load.
         container.loadPersistentStores { [weak self] _, error in
             guard let self else { return }
             if let error = error as NSError? {
@@ -346,6 +349,15 @@ final class PersistenceController: ObservableObject {
         storeURL?.deletingLastPathComponent().appendingPathComponent("Backups", isDirectory: true)
     }
 
+    private func modificationDate(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
+    private func newestBackupDate(in dir: URL) -> Date? {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter { $0.pathExtension == "sqlite" }.compactMap(modificationDate(of:)).max()
+    }
+
     /// Copies the store with the coordinator API (a plain file copy can lose the
     /// WAL — QA1809) when the current model can't open it as-is.
     private func backUpStoreIfMigrationNeeded() {
@@ -354,6 +366,8 @@ final class PersistenceController: ObservableObject {
         do {
             let metadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
             if container.managedObjectModel.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata) { return }
+            // Retrying a failed migration must not pile up copies of an unchanged store.
+            if let newest = newestBackupDate(in: dir), let storeDate = modificationDate(of: url), newest >= storeDate { return }
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
             let destination = dir.appendingPathComponent("Sikandar-\(stamp).sqlite")

@@ -2,8 +2,9 @@ import XCTest
 import CoreData
 
 /// Guards the store shipped with v1.0.0: the current model must open it with
-/// lightweight migration and keep every row. Re-capture the fixture only when
-/// a new release ships (see docs/features/core-data-migration.md).
+/// lightweight migration and keep every row. `Sikandar.xcdatamodel` is frozen as
+/// the v1.0.0 model; later changes go in a new model version. Re-capture the
+/// fixture only when a new release ships.
 final class MigrationTests: XCTestCase {
     private let fixtureName = "Sikandar-v1.0.0"
     private let expectedGames = 5, expectedPlayers = 9, expectedRounds = 173
