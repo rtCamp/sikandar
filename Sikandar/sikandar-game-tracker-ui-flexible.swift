@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import os
 
 // Sikandar is a score tracker for group games with three or more players.
 // Track every round, see running totals, and when the game ends, Sikandar
@@ -272,14 +273,37 @@ struct PersistenceController {
     }
 }
 
-func saveContext(_ context: NSManagedObjectContext) {
-    guard context.hasChanges else { return }
-    do { try context.save() } catch { print("Core Data save error: \(error)") }
+private let persistenceLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Sikandar", category: "persistence")
+
+/// One place for save failures to land; ContentView shows them as an alert.
+@MainActor
+final class SaveErrorReporter: ObservableObject {
+    static let shared = SaveErrorReporter()
+    @Published var message: String?
+}
+
+/// Saves the context. On failure the in-memory changes are rolled back so the
+/// UI never shows a state the disk doesn't have, and the user is told.
+@MainActor
+@discardableResult
+func saveContext(_ context: NSManagedObjectContext) -> Bool {
+    guard context.hasChanges else { return true }
+    do {
+        try context.save()
+        return true
+    } catch {
+        context.rollback()
+        persistenceLog.error("Save failed: \(error.localizedDescription, privacy: .public)")
+        SaveErrorReporter.shared.message = error.localizedDescription
+        return false
+    }
 }
 
 // MARK: - Root tabs
 
 struct ContentView: View {
+    @ObservedObject private var saveErrors = SaveErrorReporter.shared
+
     var body: some View {
         TabView {
             GameTab()
@@ -288,6 +312,14 @@ struct ContentView: View {
                 .tabItem { Label("History", systemImage: "clock.fill") }
             StatsTab()
                 .tabItem { Label("Stats", systemImage: "chart.bar.fill") }
+        }
+        .alert("Couldn't Save", isPresented: Binding(
+            get: { saveErrors.message != nil },
+            set: { if !$0 { saveErrors.message = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Your last change wasn't saved and has been undone. Try again; if it keeps happening, check free storage on this device.\n\n\(saveErrors.message ?? "")")
         }
     }
 }
@@ -646,7 +678,7 @@ struct StartGameSheet: View {
         var counts = [Int](repeating: 0, count: PlayerColor.palette.count)
         for player in roster { counts[Int(player.colorIndex) % counts.count] += 1 }
         p.colorIndex = Int16(counts.firstIndex(of: counts.min() ?? 0) ?? 0)
-        saveContext(viewContext)
+        guard saveContext(viewContext) else { return }
         if selected.count < maxPlayers { selected.insert(p.id) }
         newName = ""
     }
@@ -663,9 +695,9 @@ struct StartGameSheet: View {
     }
 
     private func archive(_ player: Player) {
-        selected.remove(player.id)
         player.isArchived = true
-        saveContext(viewContext)
+        guard saveContext(viewContext) else { return }
+        selected.remove(player.id)
     }
 
     private func restore(_ player: Player) {
@@ -680,7 +712,7 @@ struct StartGameSheet: View {
         game.startedAt = Date()
         game.betAmount = Double(min(maxPoints, max(1, points)))
         game.players = NSSet(array: roster.filter { selected.contains($0.id) })
-        saveContext(viewContext)
+        guard saveContext(viewContext) else { return }
         dismiss()
     }
 }
@@ -823,7 +855,7 @@ struct ActiveGameView: View {
         round.date = now
         round.winner = winner
         round.game = game
-        saveContext(viewContext)
+        guard saveContext(viewContext) else { return }
 
         roundStamp += 1
         showToast("Round \(round.index) · \(winner.name) wins")
@@ -1120,7 +1152,7 @@ struct EndGameSheet: View {
                 Section {
                     Button {
                         game.endedAt = Date()
-                        saveContext(viewContext)
+                        guard saveContext(viewContext) else { return }
                         dismiss()
                     } label: {
                         Text("Finish & Save Game")
