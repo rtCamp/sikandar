@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import os
 
 // Sikandar is a score tracker for group games with three or more players.
 // Track every round, see running totals, and when the game ends, Sikandar
@@ -22,10 +23,11 @@ enum AppInfo {
 
 // MARK: - Theme
 
+// `Color.sikandarWine` / `.sikandarGold` are generated from Assets.xcassets
+// (light + dark variants), as are the PlayerInk0…8 colors.
 extension Color {
-    static let sikandarWine  = Color(red: 0x84/255, green: 0x14/255, blue: 0x48/255)
-    static let sikandarGold  = Color(red: 0xE9/255, green: 0xB4/255, blue: 0x4C/255)
-    static let sikandarCream = Color(red: 0xF5/255, green: 0xEF/255, blue: 0xE2/255)
+    /// Fixed wine for filled buttons with white text; the dynamic wine goes pink in Dark Mode.
+    static let sikandarWineFill = Color(hex: 0x841448)
 
     init(hex: UInt32) {
         self.init(red: Double((hex >> 16) & 0xFF)/255,
@@ -35,21 +37,24 @@ extension Color {
 }
 
 /// Muted player identity colors: a light fill with a darker label of the
-/// same hue — full color without shouting over the red/green money signals.
+/// same hue — full color without shouting over the red/green score signals.
+/// `label` sits on `fill` (pills) and is fixed; `ink` is used standalone on
+/// the screen background and flips to the pastel in Dark Mode.
 struct PlayerColor {
     let fill: Color
     let label: Color
+    let ink: Color
 
     static let palette: [PlayerColor] = [
-        PlayerColor(fill: Color(hex: 0xECD9CF), label: Color(hex: 0x7A4A33)),  // terracotta
-        PlayerColor(fill: Color(hex: 0xDBE4D5), label: Color(hex: 0x4A5F42)),  // sage
-        PlayerColor(fill: Color(hex: 0xD6E0EA), label: Color(hex: 0x3D5A78)),  // powder blue
-        PlayerColor(fill: Color(hex: 0xE6D7E3), label: Color(hex: 0x6E4A68)),  // mauve
-        PlayerColor(fill: Color(hex: 0xECDFC6), label: Color(hex: 0x77602C)),  // sand
-        PlayerColor(fill: Color(hex: 0xD0E1E0), label: Color(hex: 0x3A6360)),  // sea teal
-        PlayerColor(fill: Color(hex: 0xEAD4DD), label: Color(hex: 0x7C2B4E)),  // dusty wine
-        PlayerColor(fill: Color(hex: 0xE2E2CD), label: Color(hex: 0x5C5C31)),  // olive
-        PlayerColor(fill: Color(hex: 0xDCDEE4), label: Color(hex: 0x4C5160)),  // slate
+        PlayerColor(fill: Color(hex: 0xECD9CF), label: Color(hex: 0x7A4A33), ink: Color("PlayerInk0")),  // terracotta
+        PlayerColor(fill: Color(hex: 0xDBE4D5), label: Color(hex: 0x4A5F42), ink: Color("PlayerInk1")),  // sage
+        PlayerColor(fill: Color(hex: 0xD6E0EA), label: Color(hex: 0x3D5A78), ink: Color("PlayerInk2")),  // powder blue
+        PlayerColor(fill: Color(hex: 0xE6D7E3), label: Color(hex: 0x6E4A68), ink: Color("PlayerInk3")),  // mauve
+        PlayerColor(fill: Color(hex: 0xECDFC6), label: Color(hex: 0x77602C), ink: Color("PlayerInk4")),  // sand
+        PlayerColor(fill: Color(hex: 0xD0E1E0), label: Color(hex: 0x3A6360), ink: Color("PlayerInk5")),  // sea teal
+        PlayerColor(fill: Color(hex: 0xEAD4DD), label: Color(hex: 0x7C2B4E), ink: Color("PlayerInk6")),  // dusty wine
+        PlayerColor(fill: Color(hex: 0xE2E2CD), label: Color(hex: 0x5C5C31), ink: Color("PlayerInk7")),  // olive
+        PlayerColor(fill: Color(hex: 0xDCDEE4), label: Color(hex: 0x4C5160), ink: Color("PlayerInk8")),  // slate
     ]
 }
 
@@ -67,20 +72,27 @@ extension Player {
     @NSManaged public var name: String
     @NSManaged public var colorIndex: Int16
     @NSManaged public var createdAt: Date
+    @NSManaged public var isArchived: Bool
     @NSManaged public var games: NSSet?
     @NSManaged public var wonRounds: NSSet?
 
     var color: PlayerColor {
-        PlayerColor.palette[Int(colorIndex) % PlayerColor.palette.count]
+        let n = PlayerColor.palette.count
+        return PlayerColor.palette[((Int(colorIndex) % n) + n) % n]
+    }
+
+    var hasHistory: Bool {
+        (games?.count ?? 0) > 0 || (wonRounds?.count ?? 0) > 0
     }
 }
 
-/// Display name for tight spaces: full if 8 chars or fewer, otherwise the
-/// shortest prefix that stays unique among `others`, with an ellipsis.
+/// Display name for fixed-width table columns only: full if 8 chars or
+/// fewer, otherwise the shortest unique prefix (min 5) with an ellipsis.
+/// Everywhere else shows the full name and lets it scale.
 func shortDisplayName(_ name: String, among others: [String]) -> String {
     if name.count <= 8 { return name }
     let rivals = others.filter { $0 != name }
-    for len in 3...8 {
+    for len in 5...8 {
         let prefix = String(name.prefix(len))
         let collides = rivals.contains { String($0.prefix(len)) == prefix }
         if !collides { return prefix + "…" }
@@ -130,6 +142,14 @@ extension Game {
 
     func wins(for player: Player) -> Int {
         sortedRounds.filter { $0.winner.id == player.id }.count
+    }
+
+    /// "2h 14m" between start and end; nil while the game is still running.
+    var durationText: String? {
+        guard let end = endedAt else { return nil }
+        let mins = Int(end.timeIntervalSince(startedAt) / 60)
+        guard mins >= 1 else { return nil }
+        return mins < 60 ? "\(mins)m" : "\(mins / 60)h \(mins % 60)m"
     }
 }
 
@@ -184,19 +204,44 @@ func settlementSummary(_ count: Int) -> String {
     count == 1 ? "1 transfer settles everyone" : "\(count) transfers settle everyone"
 }
 
+/// One format for every balance: signed, grouped, plain "0" for zero.
+func signedPoints(_ value: Int) -> String {
+    value.formatted(.number.sign(strategy: .always(includingZero: false)))
+}
+
+func firstName(_ name: String) -> String {
+    name.split(separator: " ").first.map { String($0) } ?? name
+}
+
+/// Winner pills: scale down slightly on press so a tap is visibly taken.
+struct PillButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 // MARK: - App
 
 @main
 struct SikandarApp: App {
-    let persistenceController = PersistenceController.shared
+    @StateObject private var persistence = PersistenceController.shared
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
-                #if os(macOS)
-                .frame(minWidth: 640, minHeight: 600)
-                #endif
+            Group {
+                if let failure = persistence.loadFailure {
+                    StoreErrorView(failure: failure) { persistence.load() }
+                } else {
+                    ContentView()
+                        .environment(\.managedObjectContext, persistence.container.viewContext)
+                }
+            }
+            #if os(macOS)
+            .frame(minWidth: 640, minHeight: 600)
+            #endif
         }
         #if os(macOS)
         .defaultSize(width: 760, height: 820)
@@ -204,44 +249,221 @@ struct SikandarApp: App {
     }
 }
 
-struct PersistenceController {
-    static let shared = PersistenceController()
-    let container: NSPersistentContainer
+// MARK: - Persistence
 
-    init(inMemory: Bool = false) {
-        container = NSPersistentContainer(name: "Sikandar")
-        if inMemory {
-            container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
+/// Why the store could not be opened, in terms the user can act on.
+/// The store file is never modified or deleted on failure.
+enum StoreLoadFailure: Equatable {
+    case deviceLocked
+    case diskFull
+    case incompatibleModel
+    case corrupt
+    case unknown(String)
+
+    init(_ error: NSError) {
+        let sqlite = (error.userInfo[NSSQLiteErrorDomain] as? NSNumber)?.intValue
+            ?? ((error.userInfo[NSUnderlyingErrorKey] as? NSError)?.code)
+        #if os(iOS)
+        let protectedDataUnavailable = !UIApplication.shared.isProtectedDataAvailable
+        #else
+        let protectedDataUnavailable = false
+        #endif
+        if protectedDataUnavailable {
+            self = .deviceLocked
+            return
         }
-        let container = self.container
-        container.loadPersistentStores { description, error in
-            if let error = error {
-                // Pre-release: model changed, throw the old store away and retry once.
-                if let url = description.url {
-                    try? container.persistentStoreCoordinator.destroyPersistentStore(at: url, ofType: NSSQLiteStoreType)
-                    container.loadPersistentStores { _, retryError in
-                        if let retryError = retryError {
-                            fatalError("Unresolved Core Data error \(retryError)")
-                        }
-                    }
-                } else {
-                    fatalError("Unresolved Core Data error \(error)")
-                }
-            }
+        switch (error.domain, error.code, sqlite) {
+        case (_, _, 13), (NSCocoaErrorDomain, NSFileWriteOutOfSpaceError, _):        // SQLITE_FULL
+            self = .diskFull
+        case (NSCocoaErrorDomain, 134100...134199, _):                                // migration / version hash
+            self = .incompatibleModel
+        case (_, _, 11), (_, _, 26):                                                  // SQLITE_CORRUPT / NOTADB
+            self = .corrupt
+        default:
+            self = .unknown("\(error.domain) \(error.code)")
         }
-        container.viewContext.automaticallyMergesChangesFromParent = true
-        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+    }
+
+    var title: String {
+        switch self {
+        case .deviceLocked: return "Unlock to Continue"
+        case .diskFull: return "Storage Is Full"
+        case .incompatibleModel: return "Update Needed"
+        case .corrupt: return "Saved Data Can't Be Read"
+        case .unknown: return "Couldn't Open Your Games"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .deviceLocked: return "Your saved games are protected while this device is locked. Unlock it and try again."
+        case .diskFull: return "There isn't enough free space to open your saved games. Free up some storage and try again. Nothing has been deleted."
+        case .incompatibleModel: return "This version of Sikandar can't open your saved games yet. Your data is untouched — install the latest update, or contact support."
+        case .corrupt: return "Your saved games file appears damaged. It has not been deleted. Restart the app; if this keeps happening, contact support."
+        case .unknown(let code): return "Something went wrong opening your saved games (\(code)). Your data has not been changed. Try again."
+        }
     }
 }
 
-func saveContext(_ context: NSManagedObjectContext) {
-    guard context.hasChanges else { return }
-    do { try context.save() } catch { print("Core Data save error: \(error)") }
+@MainActor
+final class PersistenceController: ObservableObject {
+    static let shared = PersistenceController()
+    let container: NSPersistentContainer
+    @Published private(set) var loadFailure: StoreLoadFailure?
+
+    init(inMemory: Bool = false) {
+        container = NSPersistentContainer(name: "Sikandar")
+        if inMemory, let description = container.persistentStoreDescriptions.first {
+            description.url = URL(fileURLWithPath: "/dev/null")
+        }
+        container.viewContext.automaticallyMergesChangesFromParent = true
+        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        load()
+    }
+
+    /// Opens the store. Migration is automatic for lightweight changes (container
+    /// defaults); a backup is taken first when one is needed. Failures are
+    /// published, never "fixed" — the file on disk is left exactly as it was.
+    func load() {
+        // A store that's already attached means an earlier call succeeded; re-adding it would fail.
+        guard container.persistentStoreCoordinator.persistentStores.isEmpty else { return }
+        loadFailure = nil
+        backUpStoreIfMigrationNeeded()
+        // ASSUMED: completion runs synchronously (shouldAddStoreAsynchronously defaults to false),
+        // so loadFailure is set before the first frame and Retry can't overlap a load.
+        container.loadPersistentStores { [weak self] _, error in
+            guard let self else { return }
+            if let error = error as NSError? {
+                let failure = StoreLoadFailure(error)
+                persistenceLog.error("Store load failed: \(error.domain, privacy: .public) \(error.code) → \(String(describing: failure), privacy: .public)")
+                self.loadFailure = failure
+            } else {
+                self.pruneOldBackups()
+            }
+        }
+    }
+
+    private var storeURL: URL? { container.persistentStoreDescriptions.first?.url }
+
+    private var backupDirectory: URL? {
+        storeURL?.deletingLastPathComponent().appendingPathComponent("Backups", isDirectory: true)
+    }
+
+    private func modificationDate(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
+    private func newestBackupDate(in dir: URL) -> Date? {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter { $0.pathExtension == "sqlite" }.compactMap(modificationDate(of:)).max()
+    }
+
+    /// Copies the store with the coordinator API (a plain file copy can lose the
+    /// WAL — QA1809) when the current model can't open it as-is.
+    private func backUpStoreIfMigrationNeeded() {
+        guard let url = storeURL, let dir = backupDirectory,
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            let metadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
+            if container.managedObjectModel.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata) { return }
+            // Retrying a failed migration must not pile up copies of an unchanged store.
+            if let newest = newestBackupDate(in: dir), let storeDate = modificationDate(of: url), newest >= storeDate { return }
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let destination = dir.appendingPathComponent("Sikandar-\(stamp).sqlite")
+            try container.persistentStoreCoordinator.replacePersistentStore(
+                at: destination, destinationOptions: nil,
+                withPersistentStoreFrom: url, sourceOptions: nil, type: .sqlite)
+            persistenceLog.notice("Backed up store before migration: \(destination.lastPathComponent, privacy: .public)")
+        } catch {
+            // A failed backup must not block opening; the migration itself is still safe.
+            persistenceLog.error("Pre-migration backup failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Keeps only the newest backup once a load has succeeded.
+    private func pruneOldBackups() {
+        guard let dir = backupDirectory,
+              let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        let stores = files.filter { $0.pathExtension == "sqlite" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+        for old in stores.dropFirst() {
+            try? container.persistentStoreCoordinator.destroyPersistentStore(at: old, type: .sqlite, options: nil)
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: old.path + suffix))
+            }
+        }
+    }
+}
+
+/// Blocking screen shown instead of the app when the store can't be opened.
+struct StoreErrorView: View {
+    let failure: StoreLoadFailure
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Spacer()
+            Image(systemName: failure == .deviceLocked ? "lock.fill" : "externaldrive.badge.exclamationmark")
+                .font(.system(size: 48))
+                .foregroundColor(.sikandarGold)
+            Text(failure.title)
+                .font(.title2).bold()
+                .multilineTextAlignment(.center)
+            Text(failure.message)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+            Button(action: retry) {
+                Label("Try Again", systemImage: "arrow.clockwise")
+                    .font(.headline)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 14)
+                    .background(Color.sikandarWineFill)
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 6)
+            Spacer()
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private let persistenceLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Sikandar", category: "persistence")
+
+/// One place for save failures to land; ContentView shows them as an alert.
+@MainActor
+final class SaveErrorReporter: ObservableObject {
+    static let shared = SaveErrorReporter()
+    @Published var message: String?
+}
+
+/// Saves the context. On failure the in-memory changes are rolled back so the
+/// UI never shows a state the disk doesn't have, and the user is told.
+@MainActor
+@discardableResult
+func saveContext(_ context: NSManagedObjectContext) -> Bool {
+    guard context.hasChanges else { return true }
+    do {
+        try context.save()
+        return true
+    } catch {
+        context.rollback()
+        persistenceLog.error("Save failed: \(error.localizedDescription, privacy: .public)")
+        SaveErrorReporter.shared.message = error.localizedDescription
+        return false
+    }
 }
 
 // MARK: - Root tabs
 
 struct ContentView: View {
+    @ObservedObject private var saveErrors = SaveErrorReporter.shared
+
     var body: some View {
         TabView {
             GameTab()
@@ -250,6 +472,14 @@ struct ContentView: View {
                 .tabItem { Label("History", systemImage: "clock.fill") }
             StatsTab()
                 .tabItem { Label("Stats", systemImage: "chart.bar.fill") }
+        }
+        .alert("Couldn't Save", isPresented: Binding(
+            get: { saveErrors.message != nil },
+            set: { if !$0 { saveErrors.message = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Your last change wasn't saved and has been undone. Try again; if it keeps happening, check free storage on this device.\n\n\(saveErrors.message ?? "")")
         }
     }
 }
@@ -265,7 +495,7 @@ struct PlayerDot: View {
 
     var body: some View {
         Circle()
-            .fill(player.color.label)
+            .fill(player.color.ink)
             .frame(width: size, height: size)
     }
 }
@@ -346,7 +576,7 @@ struct NoGameView: View {
                     .font(.headline)
                     .padding(.horizontal, 28)
                     .padding(.vertical, 14)
-                    .background(Color.sikandarWine)
+                    .background(Color.sikandarWineFill)
                     .foregroundColor(.white)
                     .clipShape(Capsule())
             }
@@ -363,8 +593,7 @@ struct NoGameView: View {
 
     private func lastGameSummary(_ game: Game) -> String {
         let names = game.sortedPlayers.map { $0.name }
-        let shorts = names.map { shortDisplayName($0, among: names) }
-        return "\(shorts.joined(separator: ", ")) · \(game.sortedRounds.count) rounds"
+        return "\(names.joined(separator: ", ")) · \(game.sortedRounds.count) rounds"
     }
 }
 
@@ -376,8 +605,15 @@ struct StartGameSheet: View {
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Player.name, ascending: true)],
+        predicate: NSPredicate(format: "isArchived == NO"),
         animation: .default)
     private var roster: FetchedResults<Player>
+
+    @FetchRequest(
+        sortDescriptors: [NSSortDescriptor(keyPath: \Player.name, ascending: true)],
+        predicate: NSPredicate(format: "isArchived == YES"),
+        animation: .default)
+    private var archived: FetchedResults<Player>
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Game.startedAt, ascending: false)],
@@ -387,19 +623,28 @@ struct StartGameSheet: View {
     @State private var selected: Set<UUID> = []
     @State private var newName = ""
     @FocusState private var newNameFocused: Bool
-    @State private var bet = 100
+    @State private var betText = "100"
+    @FocusState private var betFocused: Bool
     @State private var renaming: Player?
     @State private var renameText = ""
-    @State private var deleteBlockedName: String?
+    @State private var pendingRemove: Player?
+    @State private var duplicateName: String?
+    @State private var showArchived = false
     @State private var didPrefill = false
 
     private let minPlayers = 2
     private let maxPlayers = 9
+    private let maxPoints = 100_000
+
+    private var betValue: Int? { Int(betText) }
+    private var betValid: Bool { (betValue ?? 0) >= 1 }
+    private var canStart: Bool { selected.count >= minPlayers && betValid }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section(header: Text("Players (select \(minPlayers) to \(maxPlayers))")) {
+                Section(header: Text("Players · \(selected.count) of \(maxPlayers) selected"),
+                        footer: selected.count < minPlayers ? Text("Select at least \(minPlayers) players.") : nil) {
                     ForEach(roster) { player in
                         HStack {
                             PlayerDot(player: player)
@@ -423,13 +668,17 @@ struct StartGameSheet: View {
                         }
                         .opacity(!selected.contains(player.id) && selected.count >= maxPlayers ? 0.4 : 1)
                         .swipeActions(edge: .trailing) {
-                            Button("Delete", role: .destructive) { delete(player) }
+                            Button("Remove", role: .destructive) { remove(player) }
                             Button("Rename") {
                                 renaming = player
                                 renameText = player.name
                             }
                             .tint(.sikandarGold)
                         }
+                    }
+                    .onDelete { offsets in
+                        // Edit mode: one row at a time, so the history confirmation can show.
+                        if let i = offsets.first { remove(roster[i]) }
                     }
 
                     HStack {
@@ -451,39 +700,46 @@ struct StartGameSheet: View {
                     }
                 }
 
-                Section {
+                if !archived.isEmpty {
+                    Section(footer: showArchived ? Text("Removed players keep their history and stats.") : nil) {
+                        if showArchived {
+                            ForEach(archived) { player in
+                                HStack {
+                                    PlayerDot(player: player)
+                                    Text(player.name).foregroundColor(.secondary)
+                                    Spacer()
+                                    Button("Restore") { restore(player) }
+                                        .font(.subheadline.weight(.semibold))
+                                }
+                            }
+                        }
+                        Button(showArchived ? "Hide removed players" : "Show removed players (\(archived.count))") {
+                            withAnimation { showArchived.toggle() }
+                        }
+                        .font(.subheadline)
+                    }
+                }
+
+                Section(footer: betValid ? nil : Text("Enter 1 to \(maxPoints.formatted()) points.")) {
                     HStack {
                         Text("Points per round")
                         Spacer()
-                        TextField("100", value: $bet, format: .number)
+                        TextField("100", text: $betText)
                             .labelsHidden()
                             .multilineTextAlignment(.trailing)
                             .frame(width: 90)
                             .font(.body.monospacedDigit())
+                            .focused($betFocused)
 #if os(iOS)
                             .keyboardType(.numberPad)
 #endif
+                            .onChange(of: betText) {
+                                // Digits only, clamped to maxPoints; the field shows the clamped value.
+                                var t = String(betText.filter(\.isNumber).prefix(7))
+                                if let v = Int(t), v > maxPoints { t = String(maxPoints) }
+                                if t != betText { betText = t }
+                            }
                     }
-                }
-
-                Section {
-                    Button {
-                        startGame()
-                    } label: {
-                        Text(selected.count >= minPlayers
-                             ? "Start Game with \(selected.count) Players"
-                             : "Select at least \(minPlayers) players (max \(maxPlayers))")
-                            .frame(maxWidth: .infinity)
-                            .font(.headline)
-                            .padding(.vertical, 12)
-                            .background(selected.count >= minPlayers ? Color.sikandarWine : Color.gray.opacity(0.35))
-                            .foregroundColor(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(selected.count < minPlayers)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets())
                 }
             }
             .navigationTitle("New Game")
@@ -492,19 +748,32 @@ struct StartGameSheet: View {
             .frame(minWidth: 480, minHeight: 560)
             #endif
             .onAppear {
-                // Prefill with the previous game's players and bet
+                // Prefill with the previous game's players and points
                 guard !didPrefill else { return }
                 didPrefill = true
                 if let last = previousGames.first {
                     let rosterIDs = Set(roster.map { $0.id })
                     selected = Set(last.sortedPlayers.map { $0.id }).intersection(rosterIDs)
-                    bet = last.bet
+                    betText = String(last.bet)
                 }
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Start") { startGame() }
+                        .disabled(!canStart)
+                }
+                #if os(iOS)
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { betFocused = false; newNameFocused = false }
+                }
+                #endif
             }
             .alert("Rename Player", isPresented: Binding(
                 get: { renaming != nil },
@@ -515,40 +784,69 @@ struct StartGameSheet: View {
                 Button("Save") {
                     if let p = renaming {
                         let t = renameText.trimmingCharacters(in: .whitespaces)
-                        if !t.isEmpty { p.name = t; saveContext(viewContext) }
+                        if isNameTaken(t, excluding: p) {
+                            DispatchQueue.main.async { duplicateName = t }
+                        } else if !t.isEmpty {
+                            p.name = t; saveContext(viewContext)
+                        }
                     }
                 }
             }
-            .alert("Cannot Delete", isPresented: Binding(
-                get: { deleteBlockedName != nil },
-                set: { if !$0 { deleteBlockedName = nil } }
+            .alert("Name Already Used", isPresented: Binding(
+                get: { duplicateName != nil },
+                set: { if !$0 { duplicateName = nil } }
             )) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text("\(deleteBlockedName ?? "") has game history. Players with recorded games cannot be deleted.")
+                Text("A player named \(duplicateName ?? "") already exists. Use a different name so scores stay separate.")
+            }
+            .alert("Remove \(pendingRemove?.name ?? "")?", isPresented: Binding(
+                get: { pendingRemove != nil },
+                set: { if !$0 { pendingRemove = nil } }
+            )) {
+                Button("Remove", role: .destructive) {
+                    if let p = pendingRemove { archive(p) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("\(pendingRemove?.name ?? "") has played \(pendingRemove?.games?.count ?? 0) games. Their history and stats stay; they just won't appear in this list. You can restore them later.")
             }
         }
+    }
+
+    private func isNameTaken(_ name: String, excluding: Player? = nil) -> Bool {
+        (Array(roster) + Array(archived)).contains { $0 != excluding && $0.name.caseInsensitiveCompare(name) == .orderedSame }
     }
 
     private func addPlayer() {
         let name = newName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
+        // Re-adding a removed player restores them instead of creating a duplicate.
+        if let old = archived.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            restore(old)
+            if selected.count < maxPlayers { selected.insert(old.id) }
+            newName = ""
+            return
+        }
+        if isNameTaken(name) { duplicateName = name; return }
         let p = Player(context: viewContext)
         p.id = UUID()
         p.name = name
         p.createdAt = Date()
+        p.isArchived = false
         // Pick the least-used palette color
         var counts = [Int](repeating: 0, count: PlayerColor.palette.count)
         for player in roster { counts[Int(player.colorIndex) % counts.count] += 1 }
         p.colorIndex = Int16(counts.firstIndex(of: counts.min() ?? 0) ?? 0)
-        saveContext(viewContext)
+        guard saveContext(viewContext) else { return }
         if selected.count < maxPlayers { selected.insert(p.id) }
         newName = ""
     }
 
-    private func delete(_ player: Player) {
-        if (player.games?.count ?? 0) > 0 || (player.wonRounds?.count ?? 0) > 0 {
-            deleteBlockedName = player.name
+    /// Players with history are archived (after confirming); fresh ones are deleted outright.
+    private func remove(_ player: Player) {
+        if player.hasHistory {
+            pendingRemove = player
             return
         }
         selected.remove(player.id)
@@ -556,13 +854,25 @@ struct StartGameSheet: View {
         saveContext(viewContext)
     }
 
+    private func archive(_ player: Player) {
+        player.isArchived = true
+        guard saveContext(viewContext) else { return }
+        selected.remove(player.id)
+    }
+
+    private func restore(_ player: Player) {
+        player.isArchived = false
+        saveContext(viewContext)
+    }
+
     private func startGame() {
+        guard canStart, let points = betValue else { return }
         let game = Game(context: viewContext)
         game.id = UUID()
         game.startedAt = Date()
-        game.betAmount = Double(max(1, bet))
+        game.betAmount = Double(min(maxPoints, max(1, points)))
         game.players = NSSet(array: roster.filter { selected.contains($0.id) })
-        saveContext(viewContext)
+        guard saveContext(viewContext) else { return }
         dismiss()
     }
 }
@@ -583,6 +893,10 @@ struct ActiveGameView: View {
     @State private var mode: GameViewMode = .rounds
     @State private var showingEndSheet = false
     @State private var confirmUndo = false
+    @State private var confirmDiscard = false
+    @State private var roundStamp = 0
+    @State private var toast: String?
+    @State private var lastTap = Date.distantPast
 
     /// True when iPadOS's floating tab bar overlays the content top edge.
     private var needsTabBarClearance: Bool {
@@ -594,7 +908,25 @@ struct ActiveGameView: View {
     }
 
     var body: some View {
+        // Discarding deletes `game`; don't touch its properties after that.
+        if game.isDeleted || game.managedObjectContext == nil {
+            Color.clear
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("\(game.sortedPlayers.count) players · \(game.bet) pts/round · started \(game.startedAt.formatted(date: .omitted, time: .shortened))")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal)
+                .padding(.top, needsTabBarClearance ? 56 : 8)
+
             Picker("View", selection: $mode) {
                 Text("Rounds · \(game.sortedRounds.count)").tag(GameViewMode.rounds)
                 Text("Scoreboard").tag(GameViewMode.scoreboard)
@@ -604,8 +936,6 @@ struct ActiveGameView: View {
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
             .padding(.horizontal)
-            // On iPad the floating tab bar overlays the top edge; drop below it
-            .padding(.top, needsTabBarClearance ? 56 : 4)
 
             switch mode {
             case .rounds:
@@ -624,9 +954,12 @@ struct ActiveGameView: View {
                 onWin: { player in recordRound(winner: player) },
                 menu: {
                     Menu {
-                        Button("Undo Last Round") { confirmUndo = true }
-                            .disabled(game.sortedRounds.isEmpty)
-                        Button("End Game") { showingEndSheet = true }
+                        if game.sortedRounds.isEmpty {
+                            Button("Discard Game", role: .destructive) { confirmDiscard = true }
+                        } else {
+                            Button("Undo Last Round") { confirmUndo = true }
+                            Button("End Game") { showingEndSheet = true }
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                             .font(.system(size: 22))
@@ -643,8 +976,27 @@ struct ActiveGameView: View {
         #if os(iOS)
         .navigationBarHidden(true)
         #endif
+        .overlay(alignment: .top) {
+            if let toast {
+                Text(toast)
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.sikandarWine.opacity(0.35)))
+                    // Sits over the stake header line, not the table.
+                    .padding(.top, needsTabBarClearance ? 52 : 2)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .sensoryFeedback(.success, trigger: roundStamp)
         .confirmationDialog("Undo the last round?", isPresented: $confirmUndo, titleVisibility: .visible) {
             Button("Undo Last Round", role: .destructive) { undoLastRound() }
+        }
+        .confirmationDialog("Discard this game?", isPresented: $confirmDiscard, titleVisibility: .visible) {
+            Button("Discard Game", role: .destructive) { discardGame() }
+        } message: {
+            Text("No rounds were recorded. The game will not appear in History or Stats.")
         }
         .sheet(isPresented: $showingEndSheet) {
             EndGameSheet(game: game)
@@ -652,12 +1004,34 @@ struct ActiveGameView: View {
     }
 
     private func recordRound(winner: Player) {
+        // Ignore a second tap within 400 ms — a double-tap must not record two rounds.
+        let now = Date()
+        guard now.timeIntervalSince(lastTap) > 0.4 else { return }
+        lastTap = now
+
         let round = GameRound(context: viewContext)
         round.id = UUID()
         round.index = Int32(game.sortedRounds.count + 1)
-        round.date = Date()
+        round.date = now
         round.winner = winner
         round.game = game
+        guard saveContext(viewContext) else { return }
+
+        roundStamp += 1
+        showToast("Round \(round.index) · \(winner.name) wins")
+    }
+
+    private func showToast(_ text: String) {
+        withAnimation(.snappy) { toast = text }
+        let stamp = roundStamp
+        Task {
+            try? await Task.sleep(for: .seconds(1.6))
+            if stamp == roundStamp { withAnimation(.easeOut) { toast = nil } }
+        }
+    }
+
+    private func discardGame() {
+        viewContext.delete(game)
         saveContext(viewContext)
     }
 
@@ -674,6 +1048,8 @@ struct ScoreboardGrid: View {
     @ObservedObject var game: Game
     /// Detail/share views tint the leader's row; the live scoreboard stays flat.
     var tintLeader: Bool = false
+    @ScaledMetric(relativeTo: .body) private var narrowCol: CGFloat = 44
+    @ScaledMetric(relativeTo: .body) private var balanceCol: CGFloat = 80
 
     var body: some View {
         let balances = game.balances
@@ -688,9 +1064,9 @@ struct ScoreboardGrid: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("Player").frame(maxWidth: .infinity, alignment: .leading)
-                Text("Won").frame(width: 44, alignment: .trailing)
-                Text("Lost").frame(width: 44, alignment: .trailing)
-                Text("Balance").frame(width: 80, alignment: .trailing)
+                Text("Won").frame(width: narrowCol, alignment: .trailing)
+                Text("Lost").frame(width: narrowCol, alignment: .trailing)
+                Text("Balance").frame(width: balanceCol, alignment: .trailing)
             }
             .font(.headline)
             .padding(.vertical, 8)
@@ -713,14 +1089,16 @@ struct ScoreboardGrid: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     Text("\(wins)")
-                        .frame(width: 44, alignment: .trailing)
+                        .frame(width: narrowCol, alignment: .trailing)
                     Text("\(totalRounds - wins)")
                         .foregroundColor(.secondary)
-                        .frame(width: 44, alignment: .trailing)
-                    Text(bal.formatted())
+                        .frame(width: narrowCol, alignment: .trailing)
+                    Text(signedPoints(bal))
                         .foregroundColor(bal < 0 ? .red : (bal > 0 ? .green : .primary))
                         .bold()
-                        .frame(width: 80, alignment: .trailing)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .frame(width: balanceCol, alignment: .trailing)
                 }
                 .font(.body.monospacedDigit())
                 .padding(.vertical, 8)
@@ -763,7 +1141,6 @@ struct WinnerBar<MenuContent: View>: View {
 
     var body: some View {
         let players = game.sortedPlayers
-        let names = players.map { $0.name }
         let rowSlices = rowSlices(players)
 
         VStack(alignment: .leading, spacing: 8) {
@@ -782,16 +1159,18 @@ struct WinnerBar<MenuContent: View>: View {
                         Button {
                             onWin(player)
                         } label: {
-                            Text(shortDisplayName(player.name, among: names))
+                            Text(player.name)
                                 .font(.subheadline.weight(.semibold))
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                                 .foregroundColor(player.color.label)
+                                .padding(.horizontal, 10)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 13)
                                 .background(player.color.fill)
                                 .clipShape(Capsule())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PillButtonStyle())
                     }
                 }
             }
@@ -801,9 +1180,79 @@ struct WinnerBar<MenuContent: View>: View {
 
 // MARK: - Round table (pinned # / winner, scrollable player columns)
 
+/// Horizontal column scroller that reports how many columns sit past the
+/// trailing edge (`hiddenColumns`) and fades that edge while any do.
+/// Bump `scrollToEnd` to jump to the last column.
+struct OverflowCueScrollView<Content: View>: View {
+    let cellWidth: CGFloat
+    let lastColumnID: UUID?
+    @Binding var hiddenColumns: Int
+    @Binding var scrollToEnd: Int
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: true) { content }
+                .onScrollGeometryChange(for: Int.self) { g in
+                    let remaining = g.contentSize.width - g.contentOffset.x - g.containerSize.width
+                    return remaining > 2 ? Int((remaining / cellWidth).rounded(.up)) : 0
+                } action: { _, n in
+                    withAnimation(.easeOut(duration: 0.15)) { hiddenColumns = n }
+                }
+                .onChange(of: scrollToEnd) {
+                    if let id = lastColumnID {
+                        withAnimation { proxy.scrollTo(id, anchor: .trailing) }
+                    }
+                }
+                .overlay(alignment: .trailing) {
+                    if hiddenColumns > 0 {
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .frame(width: 48)
+                            .mask(LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing))
+                            .allowsHitTesting(false)
+                    }
+                }
+        }
+    }
+}
+
+/// The "N more players ›" line shown above a table while columns are hidden.
+struct OverflowCueLabel: View {
+    let hiddenColumns: Int
+    let action: () -> Void
+
+    var body: some View {
+        if hiddenColumns > 0 {
+            HStack {
+                Spacer()
+                Button(action: action) {
+                    HStack(spacing: 3) {
+                        Text("\(hiddenColumns) more \(hiddenColumns == 1 ? "player" : "players")")
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.sikandarWine)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(hiddenColumns) more players to the right")
+            }
+            .frame(height: 18)
+            .transition(.opacity)
+        }
+    }
+}
+
 struct RoundTable: View {
     @ObservedObject var game: Game
-    var rowHeight: CGFloat = 28
+    // Scaled with Dynamic Type so cells never clip at accessibility sizes.
+    // 34 + 72 + 5×56 = 386 fits a 402pt iPhone with the 8pt side padding.
+    @ScaledMetric(relativeTo: .callout) private var rowHeight: CGFloat = 28
+    @ScaledMetric(relativeTo: .callout) private var indexW: CGFloat = 34
+    @ScaledMetric(relativeTo: .callout) private var winnerW: CGFloat = 72
+    @ScaledMetric(relativeTo: .callout) private var cellW: CGFloat = 56
+    @State private var hiddenColumns = 0
+    @State private var scrollToEnd = 0
 
     var body: some View {
         let players = game.sortedPlayers
@@ -821,47 +1270,53 @@ struct RoundTable: View {
 
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
+                VStack(spacing: 0) {
+                OverflowCueLabel(hiddenColumns: hiddenColumns) { scrollToEnd += 1 }
                 HStack(alignment: .top, spacing: 0) {
                     // Pinned columns: # and Winner
                     VStack(spacing: 0) {
                         HStack {
-                            Text("#").frame(width: 34, alignment: .trailing)
-                            Text("Winner").frame(width: 76, alignment: .leading)
+                            Text("#").frame(width: indexW, alignment: .trailing)
+                            Text("Winner").frame(width: winnerW, alignment: .leading)
                         }
                         .font(.headline)
                         .frame(height: rowHeight)
                         ForEach(rows, id: \.round.id) { row in
                             HStack {
                                 Text("\(row.round.index)")
-                                    .frame(width: 34, alignment: .trailing)
+                                    .frame(width: indexW, alignment: .trailing)
                                 Text(row.round.winner.name)
                                     .lineLimit(1)
-                                    .frame(width: 76, alignment: .leading)
+                                    .frame(width: winnerW, alignment: .leading)
                             }
                             .frame(height: rowHeight)
                         }
                     }
 
-                    // Scrollable player columns
-                    ScrollView(.horizontal, showsIndicators: false) {
+                    // Scrollable player columns; the "N more" cue above reports what's off-screen.
+                    OverflowCueScrollView(cellWidth: cellW, lastColumnID: players.last?.id,
+                                          hiddenColumns: $hiddenColumns, scrollToEnd: $scrollToEnd) {
                         VStack(spacing: 0) {
                             HStack(spacing: 0) {
                                 ForEach(players) { p in
                                     Text(shortDisplayName(p.name, among: players.map { $0.name }))
                                         .font(.caption.weight(.bold))
                                         .lineLimit(1)
-                                        .foregroundColor(p.color.label)
-                                        .frame(width: 64, height: rowHeight, alignment: .trailing)
+                                        .foregroundColor(p.color.ink)
+                                        .frame(width: cellW, height: rowHeight, alignment: .trailing)
+                                        .id(p.id)
                                 }
                             }
                             ForEach(rows, id: \.round.id) { row in
                                 HStack(spacing: 0) {
                                     ForEach(players) { p in
                                         let bal = row.balances[p.id] ?? 0
-                                        Text(bal == 0 ? "0" : String(format: "%+d", bal))
+                                        Text(signedPoints(bal))
                                             .font(.callout.monospacedDigit())
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.65)
                                             .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
-                                            .frame(width: 64, height: rowHeight, alignment: .trailing)
+                                            .frame(width: cellW, height: rowHeight, alignment: .trailing)
                                     }
                                 }
                                 .id(row.round.id)
@@ -870,7 +1325,8 @@ struct RoundTable: View {
                     }
                     // Cap at content width so the table centers instead of
                     // stretching; grows with player count until it must scroll.
-                    .frame(maxWidth: CGFloat(players.count) * 64)
+                    .frame(maxWidth: CGFloat(players.count) * cellW)
+                }
                 }
                 .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity)
@@ -902,7 +1358,7 @@ struct EndGameSheet: View {
                             PlayerDot(player: player)
                             Text(player.name)
                             Spacer()
-                            Text(bal.formatted())
+                            Text(signedPoints(bal))
                                 .bold()
                                 .foregroundColor(bal < 0 ? .red : (bal > 0 ? .green : .primary))
                         }
@@ -929,14 +1385,14 @@ struct EndGameSheet: View {
                 Section {
                     Button {
                         game.endedAt = Date()
-                        saveContext(viewContext)
+                        guard saveContext(viewContext) else { return }
                         dismiss()
                     } label: {
                         Text("Finish & Save Game")
                             .frame(maxWidth: .infinity)
                             .font(.headline)
                             .padding(.vertical, 12)
-                            .background(Color.sikandarWine)
+                            .background(Color.sikandarWineFill)
                             .foregroundColor(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
@@ -961,11 +1417,13 @@ struct EndGameSheet: View {
 // MARK: - History tab
 
 struct HistoryTab: View {
+    @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Game.endedAt, ascending: false)],
         predicate: NSPredicate(format: "endedAt != nil"),
         animation: .default)
     private var games: FetchedResults<Game>
+    @State private var pendingDelete: Game?
 
     private var grouped: [(day: String, games: [Game])] {
         let fmt = DateFormatter()
@@ -1001,7 +1459,12 @@ struct HistoryTab: View {
                                     } label: {
                                         GameHistoryRow(game: game)
                                     }
-                                    .listRowSeparator(.hidden)
+                                    .swipeActions(edge: .trailing) {
+                                        Button("Delete", role: .destructive) { pendingDelete = game }
+                                    }
+                                }
+                                .onDelete { offsets in
+                                    if let i = offsets.first { pendingDelete = section.games[i] }
                                 }
                             }
                         }
@@ -1011,6 +1474,23 @@ struct HistoryTab: View {
                 }
             }
             .navigationTitle("History")
+            .toolbar {
+                #if os(iOS)
+                if !games.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) { EditButton() }
+                }
+                #endif
+            }
+            .confirmationDialog("Delete this game?", isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ), titleVisibility: .visible) {
+                Button("Delete Game", role: .destructive) {
+                    if let g = pendingDelete { viewContext.delete(g); saveContext(viewContext) }
+                }
+            } message: {
+                Text("All its rounds are removed and Stats update. This cannot be undone.")
+            }
         }
     }
 }
@@ -1019,8 +1499,7 @@ struct GameHistoryRow: View {
     @ObservedObject var game: Game
 
     private var playerList: String {
-        let names = game.sortedPlayers.map { $0.name }
-        return names.map { shortDisplayName($0, among: names) }.joined(separator: ", ")
+        game.sortedPlayers.map { $0.name }.joined(separator: ", ")
     }
 
     var body: some View {
@@ -1030,20 +1509,25 @@ struct GameHistoryRow: View {
             HStack {
                 Text((game.endedAt ?? game.startedAt).formatted(date: .omitted, time: .shortened))
                     .font(.headline)
-                Text("· \(game.sortedRounds.count) rounds · \(game.bet) pts/round")
+                Text("· \(game.sortedRounds.count) rounds · \(game.bet) pts/round" + (game.durationText.map { " · \($0)" } ?? ""))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-            HStack(spacing: 5) {
+            HStack(alignment: .top, spacing: 8) {
                 Text(playerList)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(2)
-                Spacer()
+                Spacer(minLength: 0)
                 if let top = top, let bal = balances[top.id], bal > 0 {
-                    Text("\(top.name) +\(bal)")
+                    Text("\(firstName(top.name)) \(signedPoints(bal))")
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.green)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .layoutPriority(1)
                 }
             }
         }
@@ -1119,7 +1603,6 @@ struct DetailCard<Content: View>: View {
 /// with a transfer-count summary underneath.
 struct SettlementRows: View {
     let transfers: [Settlement]
-    let playerNames: [String]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1131,16 +1614,16 @@ struct SettlementRows: View {
             } else {
                 ForEach(transfers) { t in
                     HStack(spacing: 6) {
-                        Text(shortDisplayName(t.from.name, among: playerNames))
+                        Text(t.from.name)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.7)
                         Image(systemName: "arrow.right")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text(shortDisplayName(t.to.name, among: playerNames))
+                        Text(t.to.name)
                             .bold()
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.7)
                         Spacer(minLength: 8)
                         Text(t.amount.formatted())
                             .bold()
@@ -1160,14 +1643,15 @@ struct SettlementRows: View {
     }
 }
 
-/// Shared column metrics for the detail rounds table.
-enum RoundsTableMetrics {
-    static let indexWidth: CGFloat = 30
-    static let winnerWidth: CGFloat = 76
-    static let cellWidth: CGFloat = 56
-    static let rowHeight: CGFloat = 28
+/// Column metrics for the detail rounds tables, scaled with Dynamic Type.
+struct RoundsTableMetrics {
+    var scale: CGFloat = 1
+    var indexWidth: CGFloat { 30 * scale }
+    var winnerWidth: CGFloat { 76 * scale }
+    var cellWidth: CGFloat { 56 * scale }
+    var rowHeight: CGFloat { 28 * scale }
 
-    static func tableWidth(players: Int) -> CGFloat {
+    func tableWidth(players: Int) -> CGFloat {
         indexWidth + 8 + winnerWidth + CGFloat(players) * cellWidth
     }
 }
@@ -1175,32 +1659,36 @@ enum RoundsTableMetrics {
 /// Header row of the detail rounds table (player names in their colors).
 struct DetailRoundsHeader: View {
     @ObservedObject var game: Game
+    @ScaledMetric(relativeTo: .callout) private var scale: CGFloat = 1
 
     var body: some View {
+        let m = RoundsTableMetrics(scale: scale)
         let players = game.sortedPlayers
         let names = players.map { $0.name }
         HStack(spacing: 0) {
-            Text("#").frame(width: RoundsTableMetrics.indexWidth, alignment: .trailing)
+            Text("#").frame(width: m.indexWidth, alignment: .trailing)
             Text("Winner")
-                .frame(width: RoundsTableMetrics.winnerWidth, alignment: .leading)
+                .frame(width: m.winnerWidth, alignment: .leading)
                 .padding(.leading, 8)
             ForEach(players) { p in
                 Text(shortDisplayName(p.name, among: names))
                     .lineLimit(1)
-                    .foregroundColor(p.color.label)
-                    .frame(width: RoundsTableMetrics.cellWidth, alignment: .trailing)
+                    .foregroundColor(p.color.ink)
+                    .frame(width: m.cellWidth, alignment: .trailing)
             }
         }
         .font(.caption.weight(.bold))
-        .frame(height: RoundsTableMetrics.rowHeight)
+        .frame(height: m.rowHeight)
     }
 }
 
 /// Body rows of the detail rounds table, zebra striped.
 struct DetailRoundRows: View {
     @ObservedObject var game: Game
+    @ScaledMetric(relativeTo: .callout) private var scale: CGFloat = 1
 
     var body: some View {
+        let m = RoundsTableMetrics(scale: scale)
         let players = game.sortedPlayers
         let names = players.map { $0.name }
         let rows = roundBalanceRows(for: game)
@@ -1209,20 +1697,22 @@ struct DetailRoundRows: View {
                 HStack(spacing: 0) {
                     Text("\(row.round.index)")
                         .foregroundColor(.secondary)
-                        .frame(width: RoundsTableMetrics.indexWidth, alignment: .trailing)
+                        .frame(width: m.indexWidth, alignment: .trailing)
                     Text(shortDisplayName(row.round.winner.name, among: names))
                         .lineLimit(1)
-                        .frame(width: RoundsTableMetrics.winnerWidth, alignment: .leading)
+                        .frame(width: m.winnerWidth, alignment: .leading)
                         .padding(.leading, 8)
                     ForEach(players) { p in
                         let bal = row.balances[p.id] ?? 0
-                        Text(bal == 0 ? "0" : String(format: "%+d", bal))
+                        Text(signedPoints(bal))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
                             .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
-                            .frame(width: RoundsTableMetrics.cellWidth, alignment: .trailing)
+                            .frame(width: m.cellWidth, alignment: .trailing)
                     }
                 }
                 .font(.callout.monospacedDigit())
-                .frame(height: RoundsTableMetrics.rowHeight)
+                .frame(height: m.rowHeight)
                 .background {
                     if row.zebra {
                         RoundedRectangle(cornerRadius: 6)
@@ -1235,12 +1725,24 @@ struct DetailRoundRows: View {
 }
 
 struct GameDetailView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var game: Game
     @State private var shareImage: Image?
+    @State private var confirmDelete = false
+    @ScaledMetric(relativeTo: .callout) private var tableScale: CGFloat = 1
 
     var body: some View {
+        // Deleting pops this view; never read a deleted object's properties.
+        if game.isDeleted || game.managedObjectContext == nil {
+            Color.clear
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         let players = game.sortedPlayers
-        let names = players.map { $0.name }
         let balancePairs = players.map { ($0, game.balances[$0.id] ?? 0) }
         let transfers = settle(balances: balancePairs)
         let shareTitle = "Sikandar — \((game.endedAt ?? game.startedAt).formatted(date: .abbreviated, time: .shortened))"
@@ -1252,13 +1754,13 @@ struct GameDetailView: View {
             let sideBySide = contentWidth >= 560
             // The table now lives inside the rounds card, so it must fit
             // within the card's content area (card width minus padding).
-            let tableFits = RoundsTableMetrics.tableWidth(players: players.count) <= contentWidth - 28
+            let tableFits = RoundsTableMetrics(scale: tableScale).tableWidth(players: players.count) <= contentWidth - 28
 
             ScrollView {
                 // spacing: 0 so the rounds card's pinned header and its rows
                 // join without a seam; gaps are explicit paddings instead.
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    Text("\(game.sortedRounds.count) rounds · \(game.bet) pts/round · \(players.count) players")
+                    Text("\(game.sortedRounds.count) rounds · \(game.bet) pts/round · \(players.count) players" + (game.durationText.map { " · \($0)" } ?? ""))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .padding(.bottom, 14)
@@ -1271,7 +1773,7 @@ struct GameDetailView: View {
                                 }
                                 .frame(width: (contentWidth - 14) * 2 / 3)
                                 DetailCard(title: "SETTLEMENT") {
-                                    SettlementRows(transfers: transfers, playerNames: names)
+                                    SettlementRows(transfers: transfers)
                                 }
                                 .frame(width: (contentWidth - 14) / 3)
                             }
@@ -1281,7 +1783,7 @@ struct GameDetailView: View {
                                     ScoreboardGrid(game: game, tintLeader: true)
                                 }
                                 DetailCard(title: "SETTLEMENT") {
-                                    SettlementRows(transfers: transfers, playerNames: names)
+                                    SettlementRows(transfers: transfers)
                                 }
                             }
                             .frame(width: contentWidth)
@@ -1340,6 +1842,22 @@ struct GameDetailView: View {
                     }
                 }
             }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Delete Game", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+        .confirmationDialog("Delete this game?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete Game", role: .destructive) {
+                dismiss()
+                viewContext.delete(game)
+                saveContext(viewContext)
+            }
+        } message: {
+            Text("All its rounds are removed and Stats update. This cannot be undone.")
         }
         .task { renderShareImage() }
     }
@@ -1362,18 +1880,24 @@ struct GameDetailView: View {
 /// Winner columns stay pinned, player columns scroll horizontally.
 struct SplitRoundsTable: View {
     @ObservedObject var game: Game
+    @ScaledMetric(relativeTo: .callout) private var scale: CGFloat = 1
+    @State private var hiddenColumns = 0
+    @State private var scrollToEnd = 0
 
     var body: some View {
+        let m = RoundsTableMetrics(scale: scale)
         let players = game.sortedPlayers
         let names = players.map { $0.name }
         let rows = roundBalanceRows(for: game)
-        let h = RoundsTableMetrics.rowHeight
+        let h = m.rowHeight
+        VStack(spacing: 0) {
+        OverflowCueLabel(hiddenColumns: hiddenColumns) { scrollToEnd += 1 }
         HStack(alignment: .top, spacing: 0) {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    Text("#").frame(width: RoundsTableMetrics.indexWidth, alignment: .trailing)
+                    Text("#").frame(width: m.indexWidth, alignment: .trailing)
                     Text("Winner")
-                        .frame(width: RoundsTableMetrics.winnerWidth, alignment: .leading)
+                        .frame(width: m.winnerWidth, alignment: .leading)
                         .padding(.leading, 8)
                 }
                 .font(.caption.weight(.bold))
@@ -1382,10 +1906,10 @@ struct SplitRoundsTable: View {
                     HStack(spacing: 0) {
                         Text("\(row.round.index)")
                             .foregroundColor(.secondary)
-                            .frame(width: RoundsTableMetrics.indexWidth, alignment: .trailing)
+                            .frame(width: m.indexWidth, alignment: .trailing)
                         Text(shortDisplayName(row.round.winner.name, among: names))
                             .lineLimit(1)
-                            .frame(width: RoundsTableMetrics.winnerWidth, alignment: .leading)
+                            .frame(width: m.winnerWidth, alignment: .leading)
                             .padding(.leading, 8)
                     }
                     .font(.callout.monospacedDigit())
@@ -1393,14 +1917,16 @@ struct SplitRoundsTable: View {
                     .background { if row.zebra { Rectangle().fill(Color.primary.opacity(0.04)) } }
                 }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
+            OverflowCueScrollView(cellWidth: m.cellWidth, lastColumnID: players.last?.id,
+                                  hiddenColumns: $hiddenColumns, scrollToEnd: $scrollToEnd) {
                 VStack(spacing: 0) {
                     HStack(spacing: 0) {
                         ForEach(players) { p in
                             Text(shortDisplayName(p.name, among: names))
                                 .lineLimit(1)
-                                .foregroundColor(p.color.label)
-                                .frame(width: RoundsTableMetrics.cellWidth, alignment: .trailing)
+                                .foregroundColor(p.color.ink)
+                                .frame(width: m.cellWidth, alignment: .trailing)
+                                .id(p.id)
                         }
                     }
                     .font(.caption.weight(.bold))
@@ -1409,9 +1935,11 @@ struct SplitRoundsTable: View {
                         HStack(spacing: 0) {
                             ForEach(players) { p in
                                 let bal = row.balances[p.id] ?? 0
-                                Text(bal == 0 ? "0" : String(format: "%+d", bal))
+                                Text(signedPoints(bal))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.65)
                                     .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
-                                    .frame(width: RoundsTableMetrics.cellWidth, alignment: .trailing)
+                                    .frame(width: m.cellWidth, alignment: .trailing)
                             }
                         }
                         .font(.callout.monospacedDigit())
@@ -1420,6 +1948,7 @@ struct SplitRoundsTable: View {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -1432,10 +1961,9 @@ struct GameShareView: View {
 
     var body: some View {
         let players = game.sortedPlayers
-        let names = players.map { $0.name }
         let balancePairs = players.map { ($0, game.balances[$0.id] ?? 0) }
         let transfers = settle(balances: balancePairs)
-        let tableWidth = RoundsTableMetrics.tableWidth(players: players.count)
+        let tableWidth = RoundsTableMetrics().tableWidth(players: players.count)
         let width = max(640, tableWidth + 96)
         let cardsWidth = width - 40
 
@@ -1462,7 +1990,7 @@ struct GameShareView: View {
                 }
                 .frame(width: (cardsWidth - 14) * 2 / 3)
                 DetailCard(title: "SETTLEMENT", fill: .white) {
-                    SettlementRows(transfers: transfers, playerNames: names)
+                    SettlementRows(transfers: transfers)
                 }
                 .frame(width: (cardsWidth - 14) / 3)
             }
@@ -1478,6 +2006,8 @@ struct GameShareView: View {
         .frame(width: width)
         .background(Color(hex: 0xF6F4F1))
         .environment(\.colorScheme, .light)
+        // Fixed-size render: pin text size so the table metrics match.
+        .environment(\.dynamicTypeSize, .large)
     }
 }
 
@@ -1522,6 +2052,10 @@ struct StatsTab: View {
     private var players: FetchedResults<Player>
 
     @State private var range: StatsRange = .allTime
+    @ScaledMetric(relativeTo: .body) private var gamesCol: CGFloat = 48
+    @ScaledMetric(relativeTo: .body) private var roundsCol: CGFloat = 54
+    @ScaledMetric(relativeTo: .body) private var winsCol: CGFloat = 40
+    @ScaledMetric(relativeTo: .body) private var netCol: CGFloat = 80
 
     private var filteredGames: [Game] {
         guard let start = range.startDate else { return Array(games) }
@@ -1554,10 +2088,10 @@ struct StatsTab: View {
                             HStack {
                                 Text("Player")
                                 Spacer()
-                                Text("Games").frame(width: 48, alignment: .trailing)
-                                Text("Rounds").frame(width: 54, alignment: .trailing)
-                                Text("Wins").frame(width: 40, alignment: .trailing)
-                                Text("Net").frame(width: 60, alignment: .trailing)
+                                Text("Games").frame(width: gamesCol, alignment: .trailing)
+                                Text("Played").frame(width: roundsCol, alignment: .trailing)
+                                Text("Wins").frame(width: winsCol, alignment: .trailing)
+                                Text("Net").frame(width: netCol, alignment: .trailing)
                             }
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.secondary)
@@ -1568,25 +2102,32 @@ struct StatsTab: View {
                                     Text(s.player.name).lineLimit(1)
                                     Spacer()
                                     Text("\(s.games)")
-                                        .frame(width: 48, alignment: .trailing)
+                                        .frame(width: gamesCol, alignment: .trailing)
                                     Text("\(s.rounds)")
                                         .foregroundColor(.secondary)
-                                        .frame(width: 54, alignment: .trailing)
+                                        .frame(width: roundsCol, alignment: .trailing)
                                     Text("\(s.wins)")
-                                        .frame(width: 40, alignment: .trailing)
-                                    Text(s.net.formatted())
+                                        .frame(width: winsCol, alignment: .trailing)
+                                    Text(signedPoints(s.net))
                                         .bold()
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.7)
                                         .foregroundColor(s.net < 0 ? .red : (s.net > 0 ? .green : .primary))
-                                        .frame(width: 60, alignment: .trailing)
+                                        .frame(width: netCol, alignment: .trailing)
                                 }
                                 .listRowSeparator(.hidden)
                             }
                         }
                     }
-                    .frame(maxWidth: 420)
+                    // Own background so the grouped grey doesn't stop at the width cap on iPad.
+                    .scrollContentBackground(.hidden)
+                    .frame(maxWidth: 480)
                     .frame(maxWidth: .infinity)
                 }
             }
+            #if os(iOS)
+            .background(Color(uiColor: .systemGroupedBackground))
+            #endif
             .navigationTitle("Stats")
         }
     }
