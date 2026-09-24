@@ -71,11 +71,17 @@ extension Player {
     @NSManaged public var name: String
     @NSManaged public var colorIndex: Int16
     @NSManaged public var createdAt: Date
+    @NSManaged public var isArchived: Bool
     @NSManaged public var games: NSSet?
     @NSManaged public var wonRounds: NSSet?
 
     var color: PlayerColor {
-        PlayerColor.palette[Int(colorIndex) % PlayerColor.palette.count]
+        let n = PlayerColor.palette.count
+        return PlayerColor.palette[((Int(colorIndex) % n) + n) % n]
+    }
+
+    var hasHistory: Bool {
+        (games?.count ?? 0) > 0 || (wonRounds?.count ?? 0) > 0
     }
 }
 
@@ -135,6 +141,14 @@ extension Game {
 
     func wins(for player: Player) -> Int {
         sortedRounds.filter { $0.winner.id == player.id }.count
+    }
+
+    /// "2h 14m" between start and end; nil while the game is still running.
+    var durationText: String? {
+        guard let end = endedAt else { return nil }
+        let mins = Int(end.timeIntervalSince(startedAt) / 60)
+        guard mins >= 1 else { return nil }
+        return mins < 60 ? "\(mins)m" : "\(mins / 60)h \(mins % 60)m"
     }
 }
 
@@ -399,8 +413,15 @@ struct StartGameSheet: View {
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Player.name, ascending: true)],
+        predicate: NSPredicate(format: "isArchived == NO"),
         animation: .default)
     private var roster: FetchedResults<Player>
+
+    @FetchRequest(
+        sortDescriptors: [NSSortDescriptor(keyPath: \Player.name, ascending: true)],
+        predicate: NSPredicate(format: "isArchived == YES"),
+        animation: .default)
+    private var archived: FetchedResults<Player>
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Game.startedAt, ascending: false)],
@@ -414,8 +435,9 @@ struct StartGameSheet: View {
     @FocusState private var betFocused: Bool
     @State private var renaming: Player?
     @State private var renameText = ""
-    @State private var deleteBlockedName: String?
+    @State private var pendingRemove: Player?
     @State private var duplicateName: String?
+    @State private var showArchived = false
     @State private var didPrefill = false
 
     private let minPlayers = 2
@@ -454,13 +476,17 @@ struct StartGameSheet: View {
                         }
                         .opacity(!selected.contains(player.id) && selected.count >= maxPlayers ? 0.4 : 1)
                         .swipeActions(edge: .trailing) {
-                            Button("Delete", role: .destructive) { delete(player) }
+                            Button("Remove", role: .destructive) { remove(player) }
                             Button("Rename") {
                                 renaming = player
                                 renameText = player.name
                             }
                             .tint(.sikandarGold)
                         }
+                    }
+                    .onDelete { offsets in
+                        // Edit mode: one row at a time, so the history confirmation can show.
+                        if let i = offsets.first { remove(roster[i]) }
                     }
 
                     HStack {
@@ -479,6 +505,26 @@ struct StartGameSheet: View {
                             }
                         Button("Add") { addPlayer() }
                             .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+
+                if !archived.isEmpty {
+                    Section(footer: showArchived ? Text("Removed players keep their history and stats.") : nil) {
+                        if showArchived {
+                            ForEach(archived) { player in
+                                HStack {
+                                    PlayerDot(player: player)
+                                    Text(player.name).foregroundColor(.secondary)
+                                    Spacer()
+                                    Button("Restore") { restore(player) }
+                                        .font(.subheadline.weight(.semibold))
+                                }
+                            }
+                        }
+                        Button(showArchived ? "Hide removed players" : "Show removed players (\(archived.count))") {
+                            withAnimation { showArchived.toggle() }
+                        }
+                        .font(.subheadline)
                     }
                 }
 
@@ -528,6 +574,9 @@ struct StartGameSheet: View {
                         .disabled(!canStart)
                 }
                 #if os(iOS)
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
+                }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { betFocused = false; newNameFocused = false }
@@ -559,29 +608,40 @@ struct StartGameSheet: View {
             } message: {
                 Text("A player named \(duplicateName ?? "") already exists. Use a different name so scores stay separate.")
             }
-            .alert("Cannot Delete", isPresented: Binding(
-                get: { deleteBlockedName != nil },
-                set: { if !$0 { deleteBlockedName = nil } }
+            .alert("Remove \(pendingRemove?.name ?? "")?", isPresented: Binding(
+                get: { pendingRemove != nil },
+                set: { if !$0 { pendingRemove = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("Remove", role: .destructive) {
+                    if let p = pendingRemove { archive(p) }
+                }
+                Button("Cancel", role: .cancel) {}
             } message: {
-                Text("\(deleteBlockedName ?? "") has game history. Players with recorded games cannot be deleted.")
+                Text("\(pendingRemove?.name ?? "") has played \(pendingRemove?.games?.count ?? 0) games. Their history and stats stay; they just won't appear in this list. You can restore them later.")
             }
         }
     }
 
     private func isNameTaken(_ name: String, excluding: Player? = nil) -> Bool {
-        roster.contains { $0 != excluding && $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        (Array(roster) + Array(archived)).contains { $0 != excluding && $0.name.caseInsensitiveCompare(name) == .orderedSame }
     }
 
     private func addPlayer() {
         let name = newName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
+        // Re-adding a removed player restores them instead of creating a duplicate.
+        if let old = archived.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            restore(old)
+            if selected.count < maxPlayers { selected.insert(old.id) }
+            newName = ""
+            return
+        }
         if isNameTaken(name) { duplicateName = name; return }
         let p = Player(context: viewContext)
         p.id = UUID()
         p.name = name
         p.createdAt = Date()
+        p.isArchived = false
         // Pick the least-used palette color
         var counts = [Int](repeating: 0, count: PlayerColor.palette.count)
         for player in roster { counts[Int(player.colorIndex) % counts.count] += 1 }
@@ -591,13 +651,25 @@ struct StartGameSheet: View {
         newName = ""
     }
 
-    private func delete(_ player: Player) {
-        if (player.games?.count ?? 0) > 0 || (player.wonRounds?.count ?? 0) > 0 {
-            deleteBlockedName = player.name
+    /// Players with history are archived (after confirming); fresh ones are deleted outright.
+    private func remove(_ player: Player) {
+        if player.hasHistory {
+            pendingRemove = player
             return
         }
         selected.remove(player.id)
         viewContext.delete(player)
+        saveContext(viewContext)
+    }
+
+    private func archive(_ player: Player) {
+        selected.remove(player.id)
+        player.isArchived = true
+        saveContext(viewContext)
+    }
+
+    private func restore(_ player: Player) {
+        player.isArchived = false
         saveContext(viewContext)
     }
 
@@ -652,8 +724,17 @@ struct ActiveGameView: View {
         }
     }
 
-    private var content: some View {
+    @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("\(game.sortedPlayers.count) players · \(game.bet) pts/round · started \(game.startedAt.formatted(date: .omitted, time: .shortened))")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal)
+                .padding(.top, needsTabBarClearance ? 56 : 8)
+
             Picker("View", selection: $mode) {
                 Text("Rounds · \(game.sortedRounds.count)").tag(GameViewMode.rounds)
                 Text("Scoreboard").tag(GameViewMode.scoreboard)
@@ -663,8 +744,6 @@ struct ActiveGameView: View {
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
             .padding(.horizontal)
-            // On iPad the floating tab bar overlays the top edge; drop below it
-            .padding(.top, needsTabBarClearance ? 56 : 4)
 
             switch mode {
             case .rounds:
@@ -713,7 +792,8 @@ struct ActiveGameView: View {
                     .padding(.vertical, 10)
                     .background(.regularMaterial, in: Capsule())
                     .overlay(Capsule().strokeBorder(Color.sikandarWine.opacity(0.35)))
-                    .padding(.top, 52)
+                    // Sits over the stake header line, not the table.
+                    .padding(.top, needsTabBarClearance ? 52 : 2)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
@@ -909,10 +989,11 @@ struct WinnerBar<MenuContent: View>: View {
 struct RoundTable: View {
     @ObservedObject var game: Game
     // Scaled with Dynamic Type so cells never clip at accessibility sizes.
+    // 34 + 72 + 5×56 = 386 fits a 402pt iPhone with the 8pt side padding.
     @ScaledMetric(relativeTo: .callout) private var rowHeight: CGFloat = 28
     @ScaledMetric(relativeTo: .callout) private var indexW: CGFloat = 34
-    @ScaledMetric(relativeTo: .callout) private var winnerW: CGFloat = 76
-    @ScaledMetric(relativeTo: .callout) private var cellW: CGFloat = 64
+    @ScaledMetric(relativeTo: .callout) private var winnerW: CGFloat = 72
+    @ScaledMetric(relativeTo: .callout) private var cellW: CGFloat = 56
 
     var body: some View {
         let players = game.sortedPlayers
@@ -951,8 +1032,9 @@ struct RoundTable: View {
                         }
                     }
 
-                    // Scrollable player columns
-                    ScrollView(.horizontal, showsIndicators: false) {
+                    // Scrollable player columns; indicator stays visible so a
+                    // sixth+ column is discoverable.
+                    ScrollView(.horizontal, showsIndicators: true) {
                         VStack(spacing: 0) {
                             HStack(spacing: 0) {
                                 ForEach(players) { p in
@@ -1070,11 +1152,13 @@ struct EndGameSheet: View {
 // MARK: - History tab
 
 struct HistoryTab: View {
+    @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Game.endedAt, ascending: false)],
         predicate: NSPredicate(format: "endedAt != nil"),
         animation: .default)
     private var games: FetchedResults<Game>
+    @State private var pendingDelete: Game?
 
     private var grouped: [(day: String, games: [Game])] {
         let fmt = DateFormatter()
@@ -1111,6 +1195,12 @@ struct HistoryTab: View {
                                         GameHistoryRow(game: game)
                                     }
                                     .listRowSeparator(.hidden)
+                                    .swipeActions(edge: .trailing) {
+                                        Button("Delete", role: .destructive) { pendingDelete = game }
+                                    }
+                                }
+                                .onDelete { offsets in
+                                    if let i = offsets.first { pendingDelete = section.games[i] }
                                 }
                             }
                         }
@@ -1120,6 +1210,23 @@ struct HistoryTab: View {
                 }
             }
             .navigationTitle("History")
+            .toolbar {
+                #if os(iOS)
+                if !games.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) { EditButton() }
+                }
+                #endif
+            }
+            .confirmationDialog("Delete this game?", isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ), titleVisibility: .visible) {
+                Button("Delete Game", role: .destructive) {
+                    if let g = pendingDelete { viewContext.delete(g); saveContext(viewContext) }
+                }
+            } message: {
+                Text("All its rounds are removed and Stats update. This cannot be undone.")
+            }
         }
     }
 }
@@ -1138,9 +1245,11 @@ struct GameHistoryRow: View {
             HStack {
                 Text((game.endedAt ?? game.startedAt).formatted(date: .omitted, time: .shortened))
                     .font(.headline)
-                Text("· \(game.sortedRounds.count) rounds · \(game.bet) pts/round")
+                Text("· \(game.sortedRounds.count) rounds · \(game.bet) pts/round" + (game.durationText.map { " · \($0)" } ?? ""))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             HStack(alignment: .top, spacing: 8) {
                 Text(playerList)
@@ -1350,11 +1459,23 @@ struct DetailRoundRows: View {
 }
 
 struct GameDetailView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var game: Game
     @State private var shareImage: Image?
+    @State private var confirmDelete = false
     @ScaledMetric(relativeTo: .callout) private var tableScale: CGFloat = 1
 
     var body: some View {
+        // Deleting pops this view; never read a deleted object's properties.
+        if game.isDeleted || game.managedObjectContext == nil {
+            Color.clear
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         let players = game.sortedPlayers
         let balancePairs = players.map { ($0, game.balances[$0.id] ?? 0) }
         let transfers = settle(balances: balancePairs)
@@ -1373,7 +1494,7 @@ struct GameDetailView: View {
                 // spacing: 0 so the rounds card's pinned header and its rows
                 // join without a seam; gaps are explicit paddings instead.
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    Text("\(game.sortedRounds.count) rounds · \(game.bet) pts/round · \(players.count) players")
+                    Text("\(game.sortedRounds.count) rounds · \(game.bet) pts/round · \(players.count) players" + (game.durationText.map { " · \($0)" } ?? ""))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .padding(.bottom, 14)
@@ -1455,6 +1576,22 @@ struct GameDetailView: View {
                     }
                 }
             }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Delete Game", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+        .confirmationDialog("Delete this game?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete Game", role: .destructive) {
+                dismiss()
+                viewContext.delete(game)
+                saveContext(viewContext)
+            }
+        } message: {
+            Text("All its rounds are removed and Stats update. This cannot be undone.")
         }
         .task { renderShareImage() }
     }
