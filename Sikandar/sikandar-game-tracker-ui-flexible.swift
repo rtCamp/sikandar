@@ -1445,7 +1445,6 @@ struct HistoryTab: View {
                                     } label: {
                                         GameHistoryRow(game: game)
                                     }
-                                    .listRowSeparator(.hidden)
                                     .swipeActions(edge: .trailing) {
                                         Button("Delete", role: .destructive) { pendingDelete = game }
                                     }
