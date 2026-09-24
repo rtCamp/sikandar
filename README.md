@@ -12,13 +12,32 @@ Sikandar keeps score for table games where everyone antes and one person wins ea
 
 ## Screenshots
 
-| New Game | Live Rounds | Scoreboard |
-|:---:|:---:|:---:|
-| ![New game](screenshots/new-game.png) | ![Rounds](screenshots/game-rounds.png) | ![Scoreboard](screenshots/game-scoreboard.png) |
-
-| Settlement | History | Game Detail | Stats |
-|:---:|:---:|:---:|:---:|
-| ![End game](screenshots/end-game.png) | ![History](screenshots/history.png) | ![Detail](screenshots/game-detail.png) | ![Stats](screenshots/stats.png) |
+<table>
+  <tr>
+    <th>New Game</th>
+    <th>Live Rounds</th>
+    <th>Scoreboard</th>
+    <th>Settlement</th>
+  </tr>
+  <tr>
+    <td><img src="screenshots/new-game.png" width="200" alt="New game"></td>
+    <td><img src="screenshots/game-rounds.png" width="200" alt="Live rounds"></td>
+    <td><img src="screenshots/game-scoreboard.png" width="200" alt="Scoreboard"></td>
+    <td><img src="screenshots/end-game.png" width="200" alt="Settlement"></td>
+  </tr>
+  <tr>
+    <th>History</th>
+    <th>Game Detail</th>
+    <th>Stats</th>
+    <th></th>
+  </tr>
+  <tr>
+    <td><img src="screenshots/history.png" width="200" alt="History"></td>
+    <td><img src="screenshots/game-detail.png" width="200" alt="Game detail"></td>
+    <td><img src="screenshots/stats.png" width="200" alt="Stats"></td>
+    <td></td>
+  </tr>
+</table>
 
 ## Features
 
