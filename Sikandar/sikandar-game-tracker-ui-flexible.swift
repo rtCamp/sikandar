@@ -1082,6 +1082,8 @@ struct ScoreboardGrid: View {
                     Text(signedPoints(bal))
                         .foregroundColor(bal < 0 ? .red : (bal > 0 ? .green : .primary))
                         .bold()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                         .frame(width: balanceCol, alignment: .trailing)
                 }
                 .font(.body.monospacedDigit())
@@ -1164,6 +1166,69 @@ struct WinnerBar<MenuContent: View>: View {
 
 // MARK: - Round table (pinned # / winner, scrollable player columns)
 
+/// Horizontal column scroller that reports how many columns sit past the
+/// trailing edge (`hiddenColumns`) and fades that edge while any do.
+/// Bump `scrollToEnd` to jump to the last column.
+struct OverflowCueScrollView<Content: View>: View {
+    let cellWidth: CGFloat
+    let lastColumnID: UUID?
+    @Binding var hiddenColumns: Int
+    @Binding var scrollToEnd: Int
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: true) { content }
+                .onScrollGeometryChange(for: Int.self) { g in
+                    let remaining = g.contentSize.width - g.contentOffset.x - g.containerSize.width
+                    return remaining > 2 ? Int((remaining / cellWidth).rounded(.up)) : 0
+                } action: { _, n in
+                    withAnimation(.easeOut(duration: 0.15)) { hiddenColumns = n }
+                }
+                .onChange(of: scrollToEnd) {
+                    if let id = lastColumnID {
+                        withAnimation { proxy.scrollTo(id, anchor: .trailing) }
+                    }
+                }
+                .overlay(alignment: .trailing) {
+                    if hiddenColumns > 0 {
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .frame(width: 48)
+                            .mask(LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing))
+                            .allowsHitTesting(false)
+                    }
+                }
+        }
+    }
+}
+
+/// The "N more players ›" line shown above a table while columns are hidden.
+struct OverflowCueLabel: View {
+    let hiddenColumns: Int
+    let action: () -> Void
+
+    var body: some View {
+        if hiddenColumns > 0 {
+            HStack {
+                Spacer()
+                Button(action: action) {
+                    HStack(spacing: 3) {
+                        Text("\(hiddenColumns) more \(hiddenColumns == 1 ? "player" : "players")")
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.sikandarWine)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(hiddenColumns) more players to the right")
+            }
+            .frame(height: 18)
+            .transition(.opacity)
+        }
+    }
+}
+
 struct RoundTable: View {
     @ObservedObject var game: Game
     // Scaled with Dynamic Type so cells never clip at accessibility sizes.
@@ -1172,6 +1237,8 @@ struct RoundTable: View {
     @ScaledMetric(relativeTo: .callout) private var indexW: CGFloat = 34
     @ScaledMetric(relativeTo: .callout) private var winnerW: CGFloat = 72
     @ScaledMetric(relativeTo: .callout) private var cellW: CGFloat = 56
+    @State private var hiddenColumns = 0
+    @State private var scrollToEnd = 0
 
     var body: some View {
         let players = game.sortedPlayers
@@ -1189,6 +1256,8 @@ struct RoundTable: View {
 
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
+                VStack(spacing: 0) {
+                OverflowCueLabel(hiddenColumns: hiddenColumns) { scrollToEnd += 1 }
                 HStack(alignment: .top, spacing: 0) {
                     // Pinned columns: # and Winner
                     VStack(spacing: 0) {
@@ -1210,9 +1279,9 @@ struct RoundTable: View {
                         }
                     }
 
-                    // Scrollable player columns; indicator stays visible so a
-                    // sixth+ column is discoverable.
-                    ScrollView(.horizontal, showsIndicators: true) {
+                    // Scrollable player columns; the "N more" cue above reports what's off-screen.
+                    OverflowCueScrollView(cellWidth: cellW, lastColumnID: players.last?.id,
+                                          hiddenColumns: $hiddenColumns, scrollToEnd: $scrollToEnd) {
                         VStack(spacing: 0) {
                             HStack(spacing: 0) {
                                 ForEach(players) { p in
@@ -1221,6 +1290,7 @@ struct RoundTable: View {
                                         .lineLimit(1)
                                         .foregroundColor(p.color.ink)
                                         .frame(width: cellW, height: rowHeight, alignment: .trailing)
+                                        .id(p.id)
                                 }
                             }
                             ForEach(rows, id: \.round.id) { row in
@@ -1229,6 +1299,8 @@ struct RoundTable: View {
                                         let bal = row.balances[p.id] ?? 0
                                         Text(signedPoints(bal))
                                             .font(.callout.monospacedDigit())
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.65)
                                             .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
                                             .frame(width: cellW, height: rowHeight, alignment: .trailing)
                                     }
@@ -1240,6 +1312,7 @@ struct RoundTable: View {
                     // Cap at content width so the table centers instead of
                     // stretching; grows with player count until it must scroll.
                     .frame(maxWidth: CGFloat(players.count) * cellW)
+                }
                 }
                 .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity)
@@ -1619,6 +1692,8 @@ struct DetailRoundRows: View {
                     ForEach(players) { p in
                         let bal = row.balances[p.id] ?? 0
                         Text(signedPoints(bal))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
                             .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
                             .frame(width: m.cellWidth, alignment: .trailing)
                     }
@@ -1793,6 +1868,8 @@ struct GameDetailView: View {
 struct SplitRoundsTable: View {
     @ObservedObject var game: Game
     @ScaledMetric(relativeTo: .callout) private var scale: CGFloat = 1
+    @State private var hiddenColumns = 0
+    @State private var scrollToEnd = 0
 
     var body: some View {
         let m = RoundsTableMetrics(scale: scale)
@@ -1800,6 +1877,8 @@ struct SplitRoundsTable: View {
         let names = players.map { $0.name }
         let rows = roundBalanceRows(for: game)
         let h = m.rowHeight
+        VStack(spacing: 0) {
+        OverflowCueLabel(hiddenColumns: hiddenColumns) { scrollToEnd += 1 }
         HStack(alignment: .top, spacing: 0) {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
@@ -1825,7 +1904,8 @@ struct SplitRoundsTable: View {
                     .background { if row.zebra { Rectangle().fill(Color.primary.opacity(0.04)) } }
                 }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
+            OverflowCueScrollView(cellWidth: m.cellWidth, lastColumnID: players.last?.id,
+                                  hiddenColumns: $hiddenColumns, scrollToEnd: $scrollToEnd) {
                 VStack(spacing: 0) {
                     HStack(spacing: 0) {
                         ForEach(players) { p in
@@ -1833,6 +1913,7 @@ struct SplitRoundsTable: View {
                                 .lineLimit(1)
                                 .foregroundColor(p.color.ink)
                                 .frame(width: m.cellWidth, alignment: .trailing)
+                                .id(p.id)
                         }
                     }
                     .font(.caption.weight(.bold))
@@ -1842,6 +1923,8 @@ struct SplitRoundsTable: View {
                             ForEach(players) { p in
                                 let bal = row.balances[p.id] ?? 0
                                 Text(signedPoints(bal))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.65)
                                     .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
                                     .frame(width: m.cellWidth, alignment: .trailing)
                             }
@@ -1852,6 +1935,7 @@ struct SplitRoundsTable: View {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -1958,7 +2042,7 @@ struct StatsTab: View {
     @ScaledMetric(relativeTo: .body) private var gamesCol: CGFloat = 48
     @ScaledMetric(relativeTo: .body) private var roundsCol: CGFloat = 54
     @ScaledMetric(relativeTo: .body) private var winsCol: CGFloat = 40
-    @ScaledMetric(relativeTo: .body) private var netCol: CGFloat = 60
+    @ScaledMetric(relativeTo: .body) private var netCol: CGFloat = 80
 
     private var filteredGames: [Game] {
         guard let start = range.startDate else { return Array(games) }
@@ -2013,6 +2097,8 @@ struct StatsTab: View {
                                         .frame(width: winsCol, alignment: .trailing)
                                     Text(signedPoints(s.net))
                                         .bold()
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.7)
                                         .foregroundColor(s.net < 0 ? .red : (s.net > 0 ? .green : .primary))
                                         .frame(width: netCol, alignment: .trailing)
                                 }
