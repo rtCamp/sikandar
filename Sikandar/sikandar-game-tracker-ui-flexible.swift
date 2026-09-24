@@ -227,15 +227,21 @@ struct PillButtonStyle: ButtonStyle {
 
 @main
 struct SikandarApp: App {
-    let persistenceController = PersistenceController.shared
+    @StateObject private var persistence = PersistenceController.shared
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
-                #if os(macOS)
-                .frame(minWidth: 640, minHeight: 600)
-                #endif
+            Group {
+                if let failure = persistence.loadFailure {
+                    StoreErrorView(failure: failure) { persistence.load() }
+                } else {
+                    ContentView()
+                        .environment(\.managedObjectContext, persistence.container.viewContext)
+                }
+            }
+            #if os(macOS)
+            .frame(minWidth: 640, minHeight: 600)
+            #endif
         }
         #if os(macOS)
         .defaultSize(width: 760, height: 820)
@@ -243,33 +249,173 @@ struct SikandarApp: App {
     }
 }
 
-struct PersistenceController {
+// MARK: - Persistence
+
+/// Why the store could not be opened, in terms the user can act on.
+/// The store file is never modified or deleted on failure.
+enum StoreLoadFailure: Equatable {
+    case deviceLocked
+    case diskFull
+    case incompatibleModel
+    case corrupt
+    case unknown(String)
+
+    init(_ error: NSError) {
+        let sqlite = (error.userInfo[NSSQLiteErrorDomain] as? NSNumber)?.intValue
+            ?? ((error.userInfo[NSUnderlyingErrorKey] as? NSError)?.code)
+        #if os(iOS)
+        let protectedDataUnavailable = !UIApplication.shared.isProtectedDataAvailable
+        #else
+        let protectedDataUnavailable = false
+        #endif
+        if protectedDataUnavailable {
+            self = .deviceLocked
+            return
+        }
+        switch (error.domain, error.code, sqlite) {
+        case (_, _, 13), (NSCocoaErrorDomain, NSFileWriteOutOfSpaceError, _):        // SQLITE_FULL
+            self = .diskFull
+        case (NSCocoaErrorDomain, 134100...134199, _):                                // migration / version hash
+            self = .incompatibleModel
+        case (_, _, 11), (_, _, 26):                                                  // SQLITE_CORRUPT / NOTADB
+            self = .corrupt
+        default:
+            self = .unknown("\(error.domain) \(error.code)")
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .deviceLocked: return "Unlock to Continue"
+        case .diskFull: return "Storage Is Full"
+        case .incompatibleModel: return "Update Needed"
+        case .corrupt: return "Saved Data Can't Be Read"
+        case .unknown: return "Couldn't Open Your Games"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .deviceLocked: return "Your saved games are protected while this device is locked. Unlock it and try again."
+        case .diskFull: return "There isn't enough free space to open your saved games. Free up some storage and try again. Nothing has been deleted."
+        case .incompatibleModel: return "This version of Sikandar can't open your saved games yet. Your data is untouched — install the latest update, or contact support."
+        case .corrupt: return "Your saved games file appears damaged. It has not been deleted. Restart the app; if this keeps happening, contact support."
+        case .unknown(let code): return "Something went wrong opening your saved games (\(code)). Your data has not been changed. Try again."
+        }
+    }
+}
+
+@MainActor
+final class PersistenceController: ObservableObject {
     static let shared = PersistenceController()
     let container: NSPersistentContainer
+    @Published private(set) var loadFailure: StoreLoadFailure?
 
     init(inMemory: Bool = false) {
         container = NSPersistentContainer(name: "Sikandar")
-        if inMemory {
-            container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
-        }
-        let container = self.container
-        container.loadPersistentStores { description, error in
-            if let error = error {
-                // Pre-release: model changed, throw the old store away and retry once.
-                if let url = description.url {
-                    try? container.persistentStoreCoordinator.destroyPersistentStore(at: url, ofType: NSSQLiteStoreType)
-                    container.loadPersistentStores { _, retryError in
-                        if let retryError = retryError {
-                            fatalError("Unresolved Core Data error \(retryError)")
-                        }
-                    }
-                } else {
-                    fatalError("Unresolved Core Data error \(error)")
-                }
-            }
+        if inMemory, let description = container.persistentStoreDescriptions.first {
+            description.url = URL(fileURLWithPath: "/dev/null")
         }
         container.viewContext.automaticallyMergesChangesFromParent = true
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        load()
+    }
+
+    /// Opens the store. Migration is automatic for lightweight changes (container
+    /// defaults); a backup is taken first when one is needed. Failures are
+    /// published, never "fixed" — the file on disk is left exactly as it was.
+    func load() {
+        loadFailure = nil
+        backUpStoreIfMigrationNeeded()
+        // ASSUMED: completion runs synchronously for the local SQLite store (docs/ASSUMPTIONS.md).
+        container.loadPersistentStores { [weak self] _, error in
+            guard let self else { return }
+            if let error = error as NSError? {
+                let failure = StoreLoadFailure(error)
+                persistenceLog.error("Store load failed: \(error.domain, privacy: .public) \(error.code) → \(String(describing: failure), privacy: .public)")
+                self.loadFailure = failure
+            } else {
+                self.pruneOldBackups()
+            }
+        }
+    }
+
+    private var storeURL: URL? { container.persistentStoreDescriptions.first?.url }
+
+    private var backupDirectory: URL? {
+        storeURL?.deletingLastPathComponent().appendingPathComponent("Backups", isDirectory: true)
+    }
+
+    /// Copies the store with the coordinator API (a plain file copy can lose the
+    /// WAL — QA1809) when the current model can't open it as-is.
+    private func backUpStoreIfMigrationNeeded() {
+        guard let url = storeURL, let dir = backupDirectory,
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            let metadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
+            if container.managedObjectModel.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata) { return }
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let destination = dir.appendingPathComponent("Sikandar-\(stamp).sqlite")
+            try container.persistentStoreCoordinator.replacePersistentStore(
+                at: destination, destinationOptions: nil,
+                withPersistentStoreFrom: url, sourceOptions: nil, type: .sqlite)
+            persistenceLog.notice("Backed up store before migration: \(destination.lastPathComponent, privacy: .public)")
+        } catch {
+            // A failed backup must not block opening; the migration itself is still safe.
+            persistenceLog.error("Pre-migration backup failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Keeps only the newest backup once a load has succeeded.
+    private func pruneOldBackups() {
+        guard let dir = backupDirectory,
+              let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        let stores = files.filter { $0.pathExtension == "sqlite" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+        for old in stores.dropFirst() {
+            try? container.persistentStoreCoordinator.destroyPersistentStore(at: old, type: .sqlite, options: nil)
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: old.path + suffix))
+            }
+        }
+    }
+}
+
+/// Blocking screen shown instead of the app when the store can't be opened.
+struct StoreErrorView: View {
+    let failure: StoreLoadFailure
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Spacer()
+            Image(systemName: failure == .deviceLocked ? "lock.fill" : "externaldrive.badge.exclamationmark")
+                .font(.system(size: 48))
+                .foregroundColor(.sikandarGold)
+            Text(failure.title)
+                .font(.title2).bold()
+                .multilineTextAlignment(.center)
+            Text(failure.message)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+            Button(action: retry) {
+                Label("Try Again", systemImage: "arrow.clockwise")
+                    .font(.headline)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 14)
+                    .background(Color.sikandarWineFill)
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 6)
+            Spacer()
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
