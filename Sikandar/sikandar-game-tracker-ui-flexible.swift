@@ -264,14 +264,11 @@ enum StoreLoadFailure: Equatable {
         let sqlite = (error.userInfo[NSSQLiteErrorDomain] as? NSNumber)?.intValue
             ?? ((error.userInfo[NSUnderlyingErrorKey] as? NSError)?.code)
         #if os(iOS)
-        let protectedDataUnavailable = !UIApplication.shared.isProtectedDataAvailable
-        #else
-        let protectedDataUnavailable = false
-        #endif
-        if protectedDataUnavailable {
+        if !UIApplication.shared.isProtectedDataAvailable {
             self = .deviceLocked
             return
         }
+        #endif
         switch (error.domain, error.code, sqlite) {
         case (_, _, 13), (NSCocoaErrorDomain, NSFileWriteOutOfSpaceError, _):        // SQLITE_FULL
             self = .diskFull
@@ -462,7 +459,7 @@ func saveContext(_ context: NSManagedObjectContext) -> Bool {
 // MARK: - Root tabs
 
 extension EnvironmentValues {
-    /// Full-width iPad. iPhone keeps its layout in every orientation, including Max phones in landscape.
+    /// Full-width iPad or any Mac window. iPhone keeps its layout in every orientation, including Max phones in landscape.
     @Entry var isWideLayout = false
 }
 
@@ -500,7 +497,8 @@ struct ContentView: View {
         #if os(iOS)
         return UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular
         #else
-        return false
+        // Caps and column widths still fall back to the base sizes in a narrow window.
+        return true
         #endif
     }
 
@@ -1009,6 +1007,12 @@ struct ActiveGameView: View {
                             .foregroundColor(.sikandarWine)
                             .frame(width: 44, height: 44)
                     }
+                    #if os(macOS)
+                    // macOS otherwise draws a bordered pop-up button with a chevron.
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    #endif
                 }
             )
             .frame(maxWidth: isWide ? 900 : 640)
