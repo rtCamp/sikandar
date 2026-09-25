@@ -1137,7 +1137,7 @@ struct ScoreboardGrid: View {
                         .foregroundColor(.secondary)
                         .frame(width: narrowCol, alignment: .trailing)
                     Text(signedPoints(bal))
-                        .foregroundColor(bal < 0 ? .red : (bal > 0 ? .green : .primary))
+                        .foregroundColor(bal < 0 ? .sikandarLoss : (bal > 0 ? .sikandarGain : .primary))
                         .bold()
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
@@ -1363,7 +1363,7 @@ struct RoundTable: View {
                                             .font(.callout.monospacedDigit())
                                             .lineLimit(1)
                                             .minimumScaleFactor(0.65)
-                                            .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
+                                            .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .sikandarLoss : .sikandarGain))
                                             .frame(width: cellW, height: rowHeight, alignment: .trailing)
                                     }
                                 }
@@ -1409,7 +1409,7 @@ struct EndGameSheet: View {
                             Spacer()
                             Text(signedPoints(bal))
                                 .bold()
-                                .foregroundColor(bal < 0 ? .red : (bal > 0 ? .green : .primary))
+                                .foregroundColor(bal < 0 ? .sikandarLoss : (bal > 0 ? .sikandarGain : .primary))
                         }
                     }
                 }
@@ -1579,7 +1579,7 @@ struct GameHistoryRow: View {
                 if let top = top, let bal = balances[top.id], bal > 0 {
                     Text("\(firstName(top.name)) \(signedPoints(bal))")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.green)
+                        .foregroundColor(.sikandarGain)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .layoutPriority(1)
@@ -1765,7 +1765,7 @@ struct DetailRoundRows: View {
                         Text(signedPoints(bal))
                             .lineLimit(1)
                             .minimumScaleFactor(0.65)
-                            .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
+                            .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .sikandarLoss : .sikandarGain))
                             .frame(width: m.cellWidth, alignment: .trailing)
                     }
                 }
@@ -2001,7 +2001,7 @@ struct SplitRoundsTable: View {
                                 Text(signedPoints(bal))
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.65)
-                                    .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .red : .green))
+                                    .foregroundColor(bal == 0 ? .primary : (bal < 0 ? .sikandarLoss : .sikandarGain))
                                     .frame(width: m.cellWidth, alignment: .trailing)
                             }
                         }
@@ -2177,7 +2177,7 @@ struct StatsTab: View {
                                         .bold()
                                         .lineLimit(1)
                                         .minimumScaleFactor(0.7)
-                                        .foregroundColor(s.net < 0 ? .red : (s.net > 0 ? .green : .primary))
+                                        .foregroundColor(s.net < 0 ? .sikandarLoss : (s.net > 0 ? .sikandarGain : .primary))
                                         .frame(width: netCol, alignment: .center)
                                 }
                                 .listRowSeparator(.hidden)
