@@ -461,8 +461,48 @@ func saveContext(_ context: NSManagedObjectContext) -> Bool {
 
 // MARK: - Root tabs
 
+extension EnvironmentValues {
+    /// Full-width iPad. iPhone keeps its layout in every orientation, including Max phones in landscape.
+    @Entry var isWideLayout = false
+}
+
+/// On wide layouts, text goes up two steps (never into accessibility sizes) so tables fill the iPad screen.
+struct WideLayoutText: ViewModifier {
+    @Environment(\.isWideLayout) private var isWide
+    @Environment(\.dynamicTypeSize) private var size
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if isWide {
+            let all = DynamicTypeSize.allCases
+            let i = all.firstIndex(of: size) ?? 0
+            let cap = max(i, all.firstIndex(of: .xxxLarge) ?? i)
+            content.environment(\.dynamicTypeSize, all[min(i + 2, cap)])
+        } else {
+            content
+        }
+    }
+}
+
+/// Column width for a rounds table: fixed on iPhone; on wide layouts columns
+/// share the free space, up to 1.8× the base width.
+func roundsCellWidth(base: CGFloat, available: CGFloat, pinned: CGFloat, players: Int, isWide: Bool) -> CGFloat {
+    guard isWide, players > 0 else { return base }
+    return min(max(base, (available - pinned) / CGFloat(players)), base * 1.8)
+}
+
 struct ContentView: View {
     @ObservedObject private var saveErrors = SaveErrorReporter.shared
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    #endif
+
+    private var isWideLayout: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular
+        #else
+        return false
+        #endif
+    }
 
     var body: some View {
         TabView {
@@ -473,6 +513,8 @@ struct ContentView: View {
             StatsTab()
                 .tabItem { Label("Stats", systemImage: "chart.bar.fill") }
         }
+        .modifier(WideLayoutText())
+        .environment(\.isWideLayout, isWideLayout)
         .alert("Couldn't Save", isPresented: Binding(
             get: { saveErrors.message != nil },
             set: { if !$0 { saveErrors.message = nil } }
@@ -888,6 +930,7 @@ struct ActiveGameView: View {
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var hSizeClass
     #endif
+    @Environment(\.isWideLayout) private var isWide
     @ObservedObject var game: Game
 
     @State private var mode: GameViewMode = .rounds
@@ -933,7 +976,7 @@ struct ActiveGameView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 640)
+            .frame(maxWidth: isWide ? 900 : 640)
             .frame(maxWidth: .infinity)
             .padding(.horizontal)
 
@@ -943,7 +986,7 @@ struct ActiveGameView: View {
             case .scoreboard:
                 ScrollView {
                     ScoreboardGrid(game: game)
-                        .frame(maxWidth: 480)
+                        .frame(maxWidth: isWide ? 720 : 480)
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal)
                 }
@@ -968,7 +1011,7 @@ struct ActiveGameView: View {
                     }
                 }
             )
-            .frame(maxWidth: 640)
+            .frame(maxWidth: isWide ? 900 : 640)
             .frame(maxWidth: .infinity)
             .padding(.horizontal)
             .padding(.bottom, 14)
@@ -1250,13 +1293,18 @@ struct RoundTable: View {
     @ScaledMetric(relativeTo: .callout) private var rowHeight: CGFloat = 28
     @ScaledMetric(relativeTo: .callout) private var indexW: CGFloat = 34
     @ScaledMetric(relativeTo: .callout) private var winnerW: CGFloat = 72
-    @ScaledMetric(relativeTo: .callout) private var cellW: CGFloat = 56
+    @ScaledMetric(relativeTo: .callout) private var baseCellW: CGFloat = 56
+    @Environment(\.isWideLayout) private var isWide
     @State private var hiddenColumns = 0
     @State private var scrollToEnd = 0
+    @State private var availableWidth: CGFloat = 0
 
     var body: some View {
         let players = game.sortedPlayers
         let rounds = game.sortedRounds
+        // 16 = horizontal padding, 8 = spacing between the pinned columns
+        let cellW = roundsCellWidth(base: baseCellW, available: availableWidth,
+                                    pinned: 16 + indexW + 8 + winnerW, players: players.count, isWide: isWide)
         let bet = game.bet
         // Cumulative balances per round
         var running: [UUID: Int] = Dictionary(uniqueKeysWithValues: players.map { ($0.id, 0) })
@@ -1331,6 +1379,7 @@ struct RoundTable: View {
                 .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
             .onChange(of: rows.count) {
                 if let lastID = rows.last?.round.id {
                     withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
@@ -1646,9 +1695,10 @@ struct SettlementRows: View {
 /// Column metrics for the detail rounds tables, scaled with Dynamic Type.
 struct RoundsTableMetrics {
     var scale: CGFloat = 1
+    var cellOverride: CGFloat?
     var indexWidth: CGFloat { 30 * scale }
     var winnerWidth: CGFloat { 76 * scale }
-    var cellWidth: CGFloat { 56 * scale }
+    var cellWidth: CGFloat { cellOverride ?? 56 * scale }
     var rowHeight: CGFloat { 28 * scale }
 
     func tableWidth(players: Int) -> CGFloat {
@@ -1659,10 +1709,11 @@ struct RoundsTableMetrics {
 /// Header row of the detail rounds table (player names in their colors).
 struct DetailRoundsHeader: View {
     @ObservedObject var game: Game
+    var cellWidth: CGFloat?
     @ScaledMetric(relativeTo: .callout) private var scale: CGFloat = 1
 
     var body: some View {
-        let m = RoundsTableMetrics(scale: scale)
+        let m = RoundsTableMetrics(scale: scale, cellOverride: cellWidth)
         let players = game.sortedPlayers
         let names = players.map { $0.name }
         HStack(spacing: 0) {
@@ -1685,10 +1736,11 @@ struct DetailRoundsHeader: View {
 /// Body rows of the detail rounds table, zebra striped.
 struct DetailRoundRows: View {
     @ObservedObject var game: Game
+    var cellWidth: CGFloat?
     @ScaledMetric(relativeTo: .callout) private var scale: CGFloat = 1
 
     var body: some View {
-        let m = RoundsTableMetrics(scale: scale)
+        let m = RoundsTableMetrics(scale: scale, cellOverride: cellWidth)
         let players = game.sortedPlayers
         let names = players.map { $0.name }
         let rows = roundBalanceRows(for: game)
@@ -1731,6 +1783,7 @@ struct GameDetailView: View {
     @State private var shareImage: Image?
     @State private var confirmDelete = false
     @ScaledMetric(relativeTo: .callout) private var tableScale: CGFloat = 1
+    @Environment(\.isWideLayout) private var isWide
 
     var body: some View {
         // Deleting pops this view; never read a deleted object's properties.
@@ -1755,6 +1808,10 @@ struct GameDetailView: View {
             // The table now lives inside the rounds card, so it must fit
             // within the card's content area (card width minus padding).
             let tableFits = RoundsTableMetrics(scale: tableScale).tableWidth(players: players.count) <= contentWidth - 28
+            let base = RoundsTableMetrics(scale: tableScale)
+            let detailCellW = roundsCellWidth(base: base.cellWidth, available: contentWidth - 28,
+                                              pinned: base.indexWidth + 8 + base.winnerWidth,
+                                              players: players.count, isWide: isWide && tableFits)
 
             ScrollView {
                 // spacing: 0 so the rounds card's pinned header and its rows
@@ -1794,7 +1851,7 @@ struct GameDetailView: View {
                     Section {
                         Group {
                             if tableFits {
-                                DetailRoundRows(game: game)
+                                DetailRoundRows(game: game, cellWidth: detailCellW)
                             } else {
                                 // Too wide for the screen: pinned #/Winner columns,
                                 // player columns scroll sideways.
@@ -1814,7 +1871,7 @@ struct GameDetailView: View {
                                 .kerning(0.4)
                                 .frame(maxWidth: .infinity)
                             if tableFits {
-                                DetailRoundsHeader(game: game)
+                                DetailRoundsHeader(game: game, cellWidth: detailCellW)
                             }
                         }
                         .padding(.top, 14)
@@ -2031,6 +2088,7 @@ struct StatsTab: View {
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var hSizeClass
     #endif
+    @Environment(\.isWideLayout) private var isWide
 
     private var needsTabBarClearance: Bool {
         #if os(iOS)
@@ -2070,7 +2128,7 @@ struct StatsTab: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: 420)
+                .frame(maxWidth: isWide ? 600 : 420)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal)
                 .padding(.top, needsTabBarClearance ? 56 : 10)
@@ -2121,7 +2179,7 @@ struct StatsTab: View {
                     }
                     // Own background so the grouped grey doesn't stop at the width cap on iPad.
                     .scrollContentBackground(.hidden)
-                    .frame(maxWidth: 480)
+                    .frame(maxWidth: isWide ? 720 : 480)
                     .frame(maxWidth: .infinity)
                 }
             }
