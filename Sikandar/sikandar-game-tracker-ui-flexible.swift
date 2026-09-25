@@ -1515,13 +1515,19 @@ struct HistoryTab: View {
                                 .onDelete { offsets in
                                     if let i = offsets.first { pendingDelete = section.games[i] }
                                 }
+                                .listRowBackground(Color.primary.opacity(0.05))
                             }
                         }
                     }
+                    // Plain background like the Game tab; rows carry the card fill.
+                    .scrollContentBackground(.hidden)
                     .frame(maxWidth: 560)
                     .frame(maxWidth: .infinity)
                 }
             }
+            #if os(iOS)
+            .background(Color(uiColor: .systemBackground))
+            #endif
             .navigationTitle("History")
             .toolbar {
                 #if os(iOS)
@@ -2154,6 +2160,7 @@ struct StatsTab: View {
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.secondary)
                             .listRowSeparator(.hidden)
+                            .listRowBackground(Color.primary.opacity(0.05))
                             ForEach(stats, id: \.player.id) { s in
                                 HStack {
                                     PlayerDot(player: s.player)
@@ -2174,17 +2181,18 @@ struct StatsTab: View {
                                         .frame(width: netCol, alignment: .trailing)
                                 }
                                 .listRowSeparator(.hidden)
+                                .listRowBackground(Color.primary.opacity(0.05))
                             }
                         }
                     }
-                    // Own background so the grouped grey doesn't stop at the width cap on iPad.
+                    // Plain background like the Game tab; rows carry the card fill.
                     .scrollContentBackground(.hidden)
                     .frame(maxWidth: isWide ? 720 : 480)
                     .frame(maxWidth: .infinity)
                 }
             }
             #if os(iOS)
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Color(uiColor: .systemBackground))
             #endif
             .navigationTitle("Stats")
         }
