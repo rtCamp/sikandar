@@ -6,6 +6,12 @@
 
 <p align="center"><em>A score tracker for group games with two or more players.</em></p>
 
+<p align="center">
+  <a href="https://apps.apple.com/app/sikandar-scorekeeper/id6815978303">
+    <img src="https://toolbox.marketingtools.apple.com/api/v2/badges/download-on-the-app-store/black/en-us?releaseDate=1780963200" height="48" alt="Download on the App Store">
+  </a>
+</p>
+
 Sikandar keeps score for table games where everyone puts in the same points each round and one player wins the round. Think teen patti nights with friends. Track every round, see running totals, and when the game ends, Sikandar shows the final settlement so everyone knows exactly where they stand. No more pen and paper, no more arguments.
 
 **Sikandar does not handle any payments or real money. It only keeps score.**
